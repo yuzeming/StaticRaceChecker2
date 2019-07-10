@@ -7,7 +7,6 @@ import (
 	"golang.org/x/tools/go/analysis/passes/buildssa"
 	"golang.org/x/tools/go/analysis/singlechecker"
 	"golang.org/x/tools/go/callgraph"
-	"golang.org/x/tools/go/loader"
 	"golang.org/x/tools/go/pointer"
 	"golang.org/x/tools/go/ssa"
 	"reflect"
@@ -45,7 +44,6 @@ func RacePairsAnalyzerRun(pass *analysis.Pass) (interface{}, error) {
 		runFunc1(pass, fn)
 	}
 
-
 	println("Field")
 	for i, r := range RecordSet_Field {
 		println(i, toString(pass, r.ins))
@@ -80,12 +78,9 @@ func RacePairsAnalyzerRun(pass *analysis.Pass) (interface{}, error) {
 		println(i, toString(pass, r[0].ins), "\n", toString(pass, r[1].ins))
 	}
 
-	var conf loader.Config
-	conf.CreateFromFiles(pass.Pkg.String(), pass.Files...)
-
 	var testmain = ssainput.Pkg.Prog.CreateTestMainPackage(ssainput.Pkg)
 	var pkglist = []*ssa.Package{ssainput.Pkg}
-	if testmain!=nil {
+	if testmain != nil {
 		pkglist = append(pkglist, testmain)
 	}
 
@@ -112,29 +107,30 @@ func RacePairsAnalyzerRun(pass *analysis.Pass) (interface{}, error) {
 	for _, edge := range edges {
 		fmt.Println(edge)
 	}
+
 	fmt.Println()
 
 	println("Field Pair")
 	New_PairSet_Field := PairSet_Field[:0]
 	for _, r := range PairSet_Field {
-		if CheckReachablePair(result.CallGraph,r) {
-			New_PairSet_Field = append(New_PairSet_Field,r)
+		if CheckReachablePair(result.CallGraph, r) {
+			New_PairSet_Field = append(New_PairSet_Field, r)
 		}
 	}
 
 	println("Array Pair")
 	New_PairSet_Array := PairSet_Array[:0]
 	for _, r := range PairSet_Array {
-		if CheckReachablePair(result.CallGraph,r) {
-			New_PairSet_Array = append(New_PairSet_Array,r)
+		if CheckReachablePair(result.CallGraph, r) {
+			New_PairSet_Array = append(New_PairSet_Array, r)
 		}
 	}
 
 	println("Basic Pair")
 	New_PairSet_Basic := PairSet_Basic[:0]
 	for _, r := range PairSet_Basic {
-		if CheckReachablePair(result.CallGraph,r) {
-			New_PairSet_Basic = append(New_PairSet_Basic,r)
+		if CheckReachablePair(result.CallGraph, r) {
+			New_PairSet_Basic = append(New_PairSet_Basic, r)
 		}
 	}
 
@@ -151,6 +147,64 @@ func RacePairsAnalyzerRun(pass *analysis.Pass) (interface{}, error) {
 	println("New Basic Pair")
 	for i, r := range New_PairSet_Basic {
 		println(i, toString(pass, r[0].ins), "\n", toString(pass, r[1].ins))
+	}
+
+	config2 := &pointer.Config{
+		Mains:          pkglist,
+		BuildCallGraph: true,
+	}
+	for _, r := range New_PairSet_Field {
+		if r[0].isAddr && r[1].isAddr {
+			config2.AddQuery(r[0].value)
+			config2.AddQuery(r[1].value)
+		}
+	}
+
+	for _, r := range New_PairSet_Array {
+		if r[0].isAddr && r[1].isAddr {
+			config2.AddQuery(r[0].value)
+			config2.AddQuery(r[1].value)
+		}
+	}
+	for _, r := range New_PairSet_Basic {
+		if r[0].isAddr && r[1].isAddr {
+			config2.AddQuery(r[0].value)
+			config2.AddQuery(r[1].value)
+		}
+	}
+
+	result2, err2 := pointer.Analyze(config2)
+
+	if err2 != nil {
+		panic(err) // internal error in pointer analysis
+	}
+
+	println("New Field Pair2")
+
+	for i, r := range New_PairSet_Field {
+		if r[0].isAddr && r[1].isAddr && result2.Queries[r[0].value].PointsTo().Intersects(result2.Queries[r[1].value].PointsTo()) {
+			println(i, toString(pass, r[0].ins), "\n -", toString(pass, r[1].ins))
+		} else {
+			println("Remove Pair", i)
+		}
+	}
+	println("New Field Pair2")
+
+	for i, r := range New_PairSet_Array {
+		if r[0].isAddr && r[1].isAddr && result2.Queries[r[0].value].PointsTo().Intersects(result2.Queries[r[1].value].PointsTo()) {
+			println(i, toString(pass, r[0].ins), "\n - ", toString(pass, r[1].ins))
+		} else {
+			println("Remove Pair", i)
+		}
+	}
+	println("New Basic Pair2")
+
+	for i, r := range New_PairSet_Basic {
+		if r[0].isAddr && r[1].isAddr && result2.Queries[r[0].value].PointsTo().Intersects(result2.Queries[r[1].value].PointsTo()) {
+			println(i, toString(pass, r[0].ins), "\n - ", toString(pass, r[1].ins))
+		} else {
+			println("Remove Pair", i)
+		}
 	}
 
 	return nil, nil
@@ -180,22 +234,22 @@ func CheckReachablePair(cg *callgraph.Graph, field [2]RecordField) bool {
 	}
 
 	startpoint := cg.Root
-	if _,ok:=field[0].value.(*ssa.Alloc);ok {
+	if _, ok := field[0].value.(*ssa.Alloc); ok {
 		startpoint = cg.Nodes[(*field[0].ins).Parent()]
 	}
 
 	seen := make(map[*callgraph.Node]int)
 	var queue []*callgraph.Node
 
-	queue = append(queue,startpoint)
+	queue = append(queue, startpoint)
 	seen[startpoint] = 1
 
-	for i:=0;i<len(queue);i++ {
+	for i := 0; i < len(queue); i++ {
 		now := queue[i]
 		state := seen[now]
-		for _,e := range now.Out {
+		for _, e := range now.Out {
 			new_state := state
-			if 	_,isGo := e.Site.(*ssa.Go);isGo {
+			if _, isGo := e.Site.(*ssa.Go); isGo {
 				new_state = 2
 			}
 			if seen[e.Callee] < new_state {
@@ -205,7 +259,7 @@ func CheckReachablePair(cg *callgraph.Graph, field [2]RecordField) bool {
 		}
 	}
 
-	return seen[node1] + seen[node2] >= 3 // Go + reachable
+	return seen[node1]+seen[node2] >= 3 // Go + reachable
 }
 
 func isWrite(instruction ssa.Instruction, address ssa.Value) bool {
@@ -272,6 +326,84 @@ func runFunc1(pass *analysis.Pass, fn *ssa.Function) {
 	fnname := fn.String()
 	println(fnname)
 	visitBasicBlock(fnname, fn.Blocks[0])
+
+	for _, freevar := range fn.FreeVars {
+		ref := *freevar.Referrers()
+		for i := range ref {
+			switch ref[i].(type) {
+			case *ssa.Field:
+			case *ssa.FieldAddr:
+			case *ssa.Index:
+			case *ssa.IndexAddr:
+
+			default:
+				tmp := RecordField{&ref[i], freevar, 0, true, isWrite(ref[i], freevar)}
+				RecordSet_Basic = append(RecordSet_Basic, tmp)
+			}
+		}
+	}
+}
+
+type ContextList []*ssa.CallInstruction
+type SyncMutexList struct {
+	value ssa.Value
+	op    int
+}
+
+func GenContextPath(cg *callgraph.Graph, end *callgraph.Node) (ret []ContextList) {
+	seen := make(map[*callgraph.Node]bool)
+	var dfs func(node *callgraph.Node)
+	var dfs2 func(deep int, node *callgraph.Node)
+	dfs = func(node *callgraph.Node) {
+		if seen[node] {
+			return
+		}
+		seen[node] = true
+		for _, p := range node.In {
+			dfs(p.Callee)
+		}
+	}
+	dfs(cg.Root)
+
+	var _MAX_DEEP_ = 30
+	var _MAX_ITEM_ = 10
+
+	var cl = make(ContextList, _MAX_DEEP_)
+	dfs2 = func(deep int, n *callgraph.Node) {
+		if !seen[n] || deep > _MAX_DEEP_ {
+			return
+		}
+		if n == cg.Root {
+			var cl2 = make(ContextList, _MAX_DEEP_)
+			copy(cl2, cl)
+			ret = append(ret, cl2)
+			if len(ret) >= _MAX_ITEM_ {
+				_MAX_DEEP_ = 0
+			}
+			return
+		}
+		seen[n] = false
+		for _, p := range n.Out {
+			cl[deep] = &p.Site
+			dfs2(deep+1, p.Callee)
+		}
+		seen[n] = true
+	}
+	dfs2(0, end)
+	return ret
+}
+
+func CheckHappendBefore(cg *callgraph.Graph, field [2]RecordField) bool {
+	node1 := cg.Nodes[(*field[0].ins).Parent()]
+	node2 := cg.Nodes[(*field[1].ins).Parent()]
+
+	if node1 == nil || node2 == nil {
+		return false
+	}
+
+	contectlist1 := GenContextPath(cg, node1)
+	GetHappendBeforeInstr(contectlist1)
+	contectlist2 := GenContextPath(cg, node2)
 }
 
 func main() {
