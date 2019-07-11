@@ -4,12 +4,13 @@ import (
 	"fmt"
 	"go/token"
 	"go/types"
-	"golang.org/x/tools/go/analysis"
-	"golang.org/x/tools/go/analysis/passes/buildssa"
-	"golang.org/x/tools/go/analysis/singlechecker"
 	"golang.org/x/tools/go/callgraph"
+	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/pointer"
 	"golang.org/x/tools/go/ssa"
+	"golang.org/x/tools/go/ssa/ssautil"
+	"log"
+	"os"
 	"reflect"
 	"sort"
 )
@@ -74,34 +75,44 @@ var PairSet_Field [][2]RecordField
 var PairSet_Array [][2]RecordField
 var PairSet_Basic [][2]RecordField
 
-var RacePairsAnalyzer = &analysis.Analyzer{
-	Name:     "RacePairsAnalyzer",
-	Doc:      "....",
-	Run:      RacePairsAnalyzerRun,
-	Requires: []*analysis.Analyzer{buildssa.Analyzer},
-}
-
-func RacePairsAnalyzerRun(pass *analysis.Pass) (interface{}, error) {
+func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 	println("Pass run")
-	ssainput := pass.ResultOf[buildssa.Analyzer].(*buildssa.SSA)
 
-	for _, fn := range ssainput.SrcFuncs {
-		runFunc1(pass, fn)
+	var FuncsList []*ssa.Function
+
+	for _, pkg := range pkgs {
+		for _, v := range pkg.Members {
+			f, ok := v.(*ssa.Function)
+			if ok {
+				var addAnons func(f *ssa.Function)
+				addAnons = func(f *ssa.Function) {
+					FuncsList = append(FuncsList, f)
+					for _, anon := range f.AnonFuncs {
+						addAnons(anon)
+					}
+				}
+				addAnons(f)
+			}
+		}
+	}
+
+	for _, fn := range FuncsList {
+		runFunc1(fn)
 	}
 
 	println("Field")
 	for i, r := range RecordSet_Field {
-		println(i, toString(pass, r.ins))
+		println(i, toString(prog, r.ins))
 	}
 
 	println("Array")
 	for i, r := range RecordSet_Array {
-		println(i, toString(pass, r.ins), (*r.ins).String(), r.value.String(), r.isWrite)
+		println(i, toString(prog, r.ins), (*r.ins).String(), r.value.String(), r.isWrite)
 	}
 
 	println("Basic")
 	for i, r := range RecordSet_Basic {
-		println(i, toString(pass, r.ins), (*r.ins).String(), r.value.String(), r.isWrite)
+		println(i, toString(prog, r.ins), (*r.ins).String(), r.value.String(), r.isWrite)
 	}
 
 	PairSet_Field = GenPair(RecordSet_Field)
@@ -110,27 +121,31 @@ func RacePairsAnalyzerRun(pass *analysis.Pass) (interface{}, error) {
 
 	println("Field Pair")
 	for i, r := range PairSet_Field {
-		println(i, toString(pass, r[0].ins), "\n", toString(pass, r[1].ins))
+		println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
 	}
 
 	println("Array Pair")
 	for i, r := range PairSet_Array {
-		println(i, toString(pass, r[0].ins), "\n", toString(pass, r[1].ins))
+		println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
 	}
 
 	println("Basic Pair")
 	for i, r := range PairSet_Basic {
-		println(i, toString(pass, r[0].ins), "\n", toString(pass, r[1].ins))
+		println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
 	}
 
-	var testmain = ssainput.Pkg.Prog.CreateTestMainPackage(ssainput.Pkg)
-	var pkglist = []*ssa.Package{ssainput.Pkg}
-	if testmain != nil {
-		pkglist = append(pkglist, testmain)
+	var mainpkgs []*ssa.Package
+	for _, pkg := range pkgs {
+		if pkg.Func("main") != nil {
+			mainpkgs = append(mainpkgs, pkg)
+		}
+		if testpkg := prog.CreateTestMainPackage(pkg); testpkg != nil {
+			mainpkgs = append(mainpkgs, testpkg)
+		}
 	}
 
 	config := &pointer.Config{
-		Mains:          pkglist,
+		Mains:          mainpkgs,
 		BuildCallGraph: true,
 	}
 
@@ -181,23 +196,23 @@ func RacePairsAnalyzerRun(pass *analysis.Pass) (interface{}, error) {
 
 	println("Reachable Field Pair")
 	for i, r := range Reachable_PairSet_Field {
-		println(i, toString(pass, r[0].ins), "\n", toString(pass, r[1].ins))
+		println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
 	}
 
 	println("Reachable Array Pair")
 	for i, r := range ReachablePairSetArray {
-		println(i, toString(pass, r[0].ins), "\n", toString(pass, r[1].ins))
+		println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
 	}
 
 	println("Reachable Basic Pair")
 	for i, r := range ReachablePairsetBasic {
-		println(i, toString(pass, r[0].ins), "\n", toString(pass, r[1].ins))
+		println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
 	}
 
 	config2 := &pointer.Config{
-		Mains:          pkglist,
-		BuildCallGraph: true,
+		Mains: mainpkgs,
 	}
+
 	for _, r := range Reachable_PairSet_Field {
 		if r[0].isAddr && r[1].isAddr {
 			config2.AddQuery(r[0].value)
@@ -228,7 +243,7 @@ func RacePairsAnalyzerRun(pass *analysis.Pass) (interface{}, error) {
 	AlisingPairsetField := Reachable_PairSet_Field[:0]
 	for i, r := range Reachable_PairSet_Field {
 		if r[0].isAddr && r[1].isAddr && result2.Queries[r[0].value].PointsTo().Intersects(result2.Queries[r[1].value].PointsTo()) {
-			println(i, toString(pass, r[0].ins), "\n -", toString(pass, r[1].ins))
+			println(i, toString(prog, r[0].ins), "\n -", toString(prog, r[1].ins))
 			AlisingPairsetField = append(AlisingPairsetField, r)
 		} else {
 			println("Remove Pair", i)
@@ -239,7 +254,7 @@ func RacePairsAnalyzerRun(pass *analysis.Pass) (interface{}, error) {
 	AlisingPairsetArray := ReachablePairSetArray[:0]
 	for i, r := range ReachablePairSetArray {
 		if r[0].isAddr && r[1].isAddr && result2.Queries[r[0].value].PointsTo().Intersects(result2.Queries[r[1].value].PointsTo()) {
-			println(i, toString(pass, r[0].ins), "\n - ", toString(pass, r[1].ins))
+			println(i, toString(prog, r[0].ins), "\n - ", toString(prog, r[1].ins))
 			AlisingPairsetArray = append(AlisingPairsetArray, r)
 		} else {
 			println("Remove Pair", i)
@@ -250,7 +265,7 @@ func RacePairsAnalyzerRun(pass *analysis.Pass) (interface{}, error) {
 	AlisingPairsetBasic := ReachablePairsetBasic[:0]
 	for i, r := range ReachablePairsetBasic {
 		if r[0].isAddr && r[1].isAddr && result2.Queries[r[0].value].PointsTo().Intersects(result2.Queries[r[1].value].PointsTo()) {
-			println(i, toString(pass, r[0].ins), "\n - ", toString(pass, r[1].ins))
+			println(i, toString(prog, r[0].ins), "\n - ", toString(prog, r[1].ins))
 			AlisingPairsetBasic = append(AlisingPairsetBasic, r)
 		} else {
 			println("Remove Pair", i)
@@ -258,16 +273,15 @@ func RacePairsAnalyzerRun(pass *analysis.Pass) (interface{}, error) {
 	}
 
 	for _, r := range AlisingPairsetField {
-		CheckHappendBefore(pass, result.CallGraph, r)
+		CheckHappendBefore(prog, result.CallGraph, r)
 	}
 
 	for _, r := range AlisingPairsetArray {
-		CheckHappendBefore(pass, result.CallGraph, r)
+		CheckHappendBefore(prog, result.CallGraph, r)
 	}
 	for _, r := range AlisingPairsetBasic {
-		CheckHappendBefore(pass, result.CallGraph, r)
+		CheckHappendBefore(prog, result.CallGraph, r)
 	}
-	return nil, nil
 }
 
 func GenPair(RecordSet []RecordField) (ret [][2]RecordField) {
@@ -330,7 +344,7 @@ func isWrite(instruction ssa.Instruction, address ssa.Value) bool {
 	return false
 }
 
-func toString(pass *analysis.Pass, op *ssa.Instruction) string {
+func toString(pass *ssa.Program, op *ssa.Instruction) string {
 	return (*pass.Fset).Position((*op).Pos()).String()
 }
 
@@ -387,7 +401,7 @@ func visitBasicBlock(fnname string, bb *ssa.BasicBlock) {
 	}
 }
 
-func runFunc1(pass *analysis.Pass, fn *ssa.Function) {
+func runFunc1(fn *ssa.Function) {
 	fnname := fn.String()
 	println(fnname)
 	visitBasicBlock(fnname, fn.Blocks[0])
@@ -681,23 +695,23 @@ func HappensBeforeFromSet(beforeList SyncMutexList, afterList SyncMutexList) boo
 	return false
 }
 
-func PrintCtx(pass *analysis.Pass, ctx ContextList) {
+func PrintCtx(prog *ssa.Program, ctx ContextList) {
 	for i, c := range ctx {
-		println("\t#", i, (*pass.Fset).Position(c.Pos()).String(), c.String())
+		println("\t#", i, (*prog.Fset).Position(c.Pos()).String(), c.String())
 	}
 }
 
-func ReportRaceWithCtx(pass *analysis.Pass, field [2]RecordField, ctx [2]ContextList) {
+func ReportRaceWithCtx(prog *ssa.Program, field [2]RecordField, ctx [2]ContextList) {
 	println("Race Found:[ZZZ]")
-	println(toString(pass, field[0].ins))
-	PrintCtx(pass, ctx[0])
+	println(toString(prog, field[0].ins))
+	PrintCtx(prog, ctx[0])
 	println("============")
-	println(toString(pass, field[1].ins))
-	PrintCtx(pass, ctx[1])
+	println(toString(prog, field[1].ins))
+	PrintCtx(prog, ctx[1])
 	println("============")
 }
 
-func CheckHappendBefore(pass *analysis.Pass, cg *callgraph.Graph, field [2]RecordField) {
+func CheckHappendBefore(prog *ssa.Program, cg *callgraph.Graph, field [2]RecordField) {
 	node1 := cg.Nodes[(*field[0].ins).Parent()]
 	node2 := cg.Nodes[(*field[1].ins).Parent()]
 
@@ -753,7 +767,7 @@ func CheckHappendBefore(pass *analysis.Pass, cg *callgraph.Graph, field [2]Recor
 			}
 
 			if flag == 0 {
-				ReportRaceWithCtx(pass, field, [2]ContextList{ctx1, ctx2})
+				ReportRaceWithCtx(prog, field, [2]ContextList{ctx1, ctx2})
 				return
 			}
 		}
@@ -761,5 +775,17 @@ func CheckHappendBefore(pass *analysis.Pass, cg *callgraph.Graph, field [2]Recor
 }
 
 func main() {
-	singlechecker.Main(RacePairsAnalyzer)
+	cfg := packages.Config{Mode: packages.LoadAllSyntax | packages.NeedImports, Tests: true}
+	initial, err := packages.Load(&cfg, os.Args[1])
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Create SSA packages for well-typed packages and their dependencies.
+	prog, pkgs := ssautil.AllPackages(initial, ssa.PrintPackages)
+	_ = pkgs
+
+	// Build SSA code for the whole program.
+	prog.Build()
+	RacePairsAnalyzerRun(prog, pkgs)
 }
