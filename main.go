@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"go/token"
 	"go/types"
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/buildssa"
@@ -19,6 +20,40 @@ type RecordField struct {
 	Field   int
 	isAddr  bool
 	isWrite bool
+}
+
+var FastFreeVarMap = make(map[*ssa.FreeVar]*ssa.Value)
+
+func AddFreeVarMap(a *ssa.FreeVar, b *ssa.Value) {
+	FastFreeVarMap[a] = b
+}
+
+func LockupFreeVar(a *ssa.FreeVar) (ret *ssa.Value) {
+	ret = FastFreeVarMap[a]
+	for ret != nil {
+		a2, isFreeVal := (*ret).(*ssa.FreeVar)
+		if isFreeVal {
+			ret2, ok := FastFreeVarMap[a2]
+			if ok {
+				ret = ret2
+			} else {
+				return ret
+			}
+		} else {
+			return ret
+		}
+	}
+	return ret
+}
+
+func FastSame(a *ssa.Value, b *ssa.Value) bool {
+	if fa, isok := (*a).(*ssa.FreeVar); isok {
+		a = LockupFreeVar(fa)
+	}
+	if fb, isok := (*b).(*ssa.FreeVar); isok {
+		b = LockupFreeVar(fb)
+	}
+	return a == b || reflect.DeepEqual(a, b)
 }
 
 var RecordSet_Field []RecordField
@@ -309,6 +344,11 @@ func analysisInstrs(instrs *ssa.Instruction) {
 				RecordSet_Basic = append(RecordSet_Basic, tmp)
 			}
 		}
+	case *ssa.MakeClosure:
+		freevar := ins.Fn.(*ssa.Function).FreeVars
+		for i := range ins.Bindings {
+			AddFreeVarMap(freevar[i], &ins.Bindings[i])
+		}
 	default:
 	}
 }
@@ -345,10 +385,14 @@ func runFunc1(pass *analysis.Pass, fn *ssa.Function) {
 }
 
 type ContextList []*ssa.CallInstruction
-type SyncMutexList struct {
-	value ssa.Value
-	op    int
+type SyncMutexItem struct {
+	value     ssa.Value
+	gocall    *ssa.CallCommon
+	op        int
+	deferCall bool
 }
+
+type SyncMutexList []SyncMutexItem
 
 func GenContextPath(cg *callgraph.Graph, end *callgraph.Node) (ret []ContextList) {
 	seen := make(map[*callgraph.Node]bool)
@@ -393,17 +437,234 @@ func GenContextPath(cg *callgraph.Graph, end *callgraph.Node) (ret []ContextList
 	return ret
 }
 
-func CheckHappendBefore(cg *callgraph.Graph, field [2]RecordField) bool {
+func GetSyncValue(instr *ssa.Instruction) (ret SyncMutexList) {
+	switch ins := (*instr).(type) {
+	case *ssa.Send:
+		return SyncMutexList{SyncMutexItem{value: ins.Chan, deferCall: false, op: 1}} //1 for send
+	case *ssa.Select:
+		if !ins.Blocking {
+			return nil
+		}
+		ret = nil
+		for _, state := range ins.States {
+			ret = append(ret, SyncMutexItem{state.Chan, nil, int(state.Dir), false})
+		}
+	case *ssa.UnOp:
+		if ins.Op == token.ARROW {
+			return SyncMutexList{SyncMutexItem{ins.X, nil, 2, false}} //2 for recv
+		}
+	case *ssa.Call:
+		sig := ins.Call.Signature().String()
+		switch sig {
+		//case "(*sync.Mutex).Lock":
+		//	return SyncMutexList{SyncMutexItem{value:ins.Call.Args[0],deferCall:false,op:10}} //10 for Lock
+		//case "(*sync.Mutex).Unlock":
+		//	return SyncMutexList{SyncMutexItem{value:ins.Call.Args[0],deferCall:false,op:11}} //11 for Unlock
+		case "(*sync.WaitGroup).Done":
+			return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 20, false}} //20 for Done
+		case "(*sync.WaitGroup).Wait":
+			return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 21, false}} //21 for Wait
+		case "close":
+			if _, ischen := ins.Call.Args[0].Type().(*types.Chan); ischen {
+				return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 3, false}} //21 for close chan
+			}
+		}
+	case *ssa.Defer:
+		sig := ins.Call.Signature().String()
+		switch sig {
+		//case "(*sync.Mutex).Lock":
+		//	panic("Call Lock in defer???")
+		//case "(*sync.Mutex).Unlock":
+		//	return SyncMutexList{SyncMutexItem{value:ins.Call.Args[0],deferCall:true,op:11}} //11 for Unlock
+		case "(*sync.WaitGroup).Done":
+			return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 20, true}} //20 for Done
+		case "(*sync.WaitGroup).Wait":
+			return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 21, true}} //21 for Wait
+		case "close":
+			if _, ischen := ins.Call.Args[0].Type().(*types.Chan); ischen {
+				return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 3, true}} //21 for close chan
+			}
+		}
+	case *ssa.Go:
+		return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 30, true}} //30 for GoCall
+	}
+	return nil
+}
+
+func GetBefore(start ssa.Instruction) (sync SyncMutexList) {
+
+	bb := start.Block()
+	match := false
+
+	for bb != nil {
+		for i := len(bb.Instrs) - 1; i >= 0; i-- {
+			if !match && reflect.DeepEqual(bb.Instrs[i], start) {
+				match = true
+			}
+			if match {
+				if tmp := GetSyncValue(&bb.Instrs[i]); tmp != nil {
+					sync = append(sync, tmp...)
+				}
+			}
+		}
+		bb = bb.Idom()
+	}
+	return sync
+}
+
+func GetAfter(start ssa.Instruction) (sync SyncMutexList) {
+	bb := start.Block()
+	match := false
+
+	var que []*ssa.BasicBlock
+	var seen = make(map[*ssa.BasicBlock]bool)
+	que = append(que, bb)
+	seen[bb] = true
+	for i := 0; i < len(que); i++ {
+		bb = que[i]
+		for i := range bb.Instrs {
+			if !match && reflect.DeepEqual(bb.Instrs[i], start) {
+				match = true
+			}
+			if match {
+				if tmp := GetSyncValue(&bb.Instrs[i]); tmp != nil {
+					sync = append(sync, tmp...)
+				}
+			}
+		}
+		for _, succ := range bb.Succs {
+			if !seen[succ] {
+				seen[succ] = true
+				que = append(que, succ)
+			}
+		}
+	}
+	return sync
+}
+
+func FilterDefer(buf SyncMutexList) (bf, af SyncMutexList) {
+	for _, x := range buf {
+		if x.deferCall {
+			af = append(af, x)
+		} else {
+			bf = append(bf, x)
+		}
+	}
+	return bf, af
+}
+
+func GetBeforeAfertSet(cl ContextList) [2]SyncMutexList {
+	var tmp SyncMutexList
+	seenGo := false
+	var BeforeSet, AfterSet SyncMutexList
+	for j := len(cl) - 1; j >= 0; j-- {
+		ins := *cl[j]
+		tmp = append(tmp, GetBefore(ins)...)
+		if _, isGo := ins.(*ssa.Go); seenGo || isGo {
+			seenGo = true
+		}
+		bf, af := FilterDefer(tmp)
+		BeforeSet = append(BeforeSet, bf...)
+		if !seenGo {
+			AfterSet = append(AfterSet, af...)
+			AfterSet = append(AfterSet, GetAfter(ins)...)
+		}
+	}
+	return [2]SyncMutexList{BeforeSet, AfterSet}
+}
+
+func FindGoCallInAfterSet(ctx1 ContextList, afterSet SyncMutexList) bool {
+	for _, call := range ctx1 {
+		call2, isgo := (*call).(*ssa.Go)
+		if !isgo {
+			continue
+		}
+		for _, item := range afterSet {
+			if item.gocall != nil && item.gocall == (*call2).Common() {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// item_B Happens before or sync with item_A
+func HappensBeforeFromSet(beforeList SyncMutexList, afterList SyncMutexList) bool {
+	//Find Chan
+	for _, itemB := range beforeList {
+		if itemB.op < 10 { // is a chan
+			for _, itemA := range afterList {
+				if itemA.op < 10 && itemA.op != itemB.op && FastSame(&itemA.value, &itemB.value) {
+					return true
+				}
+			}
+		}
+	}
+
+	// Find Wg
+	for _, itemB := range beforeList {
+		if itemB.op < 20 { // is a Wg.Wait
+			for _, itemA := range afterList {
+				if itemA.op == 21 && FastSame(&itemA.value, &itemB.value) { // is a Wg.Done
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+func CheckHappendBefore(cg *callgraph.Graph, field [2]RecordField) int {
 	node1 := cg.Nodes[(*field[0].ins).Parent()]
 	node2 := cg.Nodes[(*field[1].ins).Parent()]
 
 	if node1 == nil || node2 == nil {
-		return false
+		return 0
 	}
 
-	contectlist1 := GenContextPath(cg, node1)
-	GetHappendBeforeInstr(contectlist1)
-	contectlist2 := GenContextPath(cg, node2)
+	contextlist1 := GenContextPath(cg, node1)
+	contextlist2 := GenContextPath(cg, node2)
+	var BASet1, BASet2 [][2]SyncMutexList
+
+	for i := range contextlist1 {
+		BASet1 = append(BASet1, GetBeforeAfertSet(contextlist1[i]))
+	}
+
+	for i := range contextlist2 {
+		BASet2 = append(BASet2, GetBeforeAfertSet(contextlist2[i]))
+	}
+
+	for i, set1 := range BASet1 {
+		ctx1 := contextlist1[i]
+		for j, set2 := range BASet2 {
+			ctx2 := contextlist2[j]
+
+			flag := 0
+			//Find Go1 in Afterset2
+			if FindGoCallInAfterSet(ctx1, set2[1]) {
+				flag = 1
+			}
+
+			if FindGoCallInAfterSet(ctx2, set1[1]) {
+				flag = -1
+			}
+
+			if HappensBeforeFromSet(set1[0], set2[1]) {
+				flag = 1
+			}
+
+			if HappensBeforeFromSet(set2[0], set1[1]) {
+				flag = -1
+			}
+
+			if flag == 0 {
+				//report race with ctx
+				return 0
+			}
+		}
+	}
+	return 0
 }
 
 func main() {
