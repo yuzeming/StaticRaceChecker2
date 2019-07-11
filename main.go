@@ -46,7 +46,17 @@ func LockupFreeVar(a *ssa.FreeVar) (ret *ssa.Value) {
 	return ret
 }
 
+func GetValue(a *ssa.Value) *ssa.Value {
+	switch b := (*a).(type) {
+	case *ssa.UnOp:
+		return GetValue(&b.X)
+	}
+	return a
+}
+
 func FastSame(a *ssa.Value, b *ssa.Value) bool {
+	a = GetValue(a)
+	b = GetValue(b)
 	if fa, isok := (*a).(*ssa.FreeVar); isok {
 		a = LockupFreeVar(fa)
 	}
@@ -146,41 +156,41 @@ func RacePairsAnalyzerRun(pass *analysis.Pass) (interface{}, error) {
 	fmt.Println()
 
 	println("Field Pair")
-	New_PairSet_Field := PairSet_Field[:0]
+	Reachable_PairSet_Field := PairSet_Field[:0]
 	for _, r := range PairSet_Field {
 		if CheckReachablePair(result.CallGraph, r) {
-			New_PairSet_Field = append(New_PairSet_Field, r)
+			Reachable_PairSet_Field = append(Reachable_PairSet_Field, r)
 		}
 	}
 
 	println("Array Pair")
-	New_PairSet_Array := PairSet_Array[:0]
+	ReachablePairSetArray := PairSet_Array[:0]
 	for _, r := range PairSet_Array {
 		if CheckReachablePair(result.CallGraph, r) {
-			New_PairSet_Array = append(New_PairSet_Array, r)
+			ReachablePairSetArray = append(ReachablePairSetArray, r)
 		}
 	}
 
 	println("Basic Pair")
-	New_PairSet_Basic := PairSet_Basic[:0]
+	ReachablePairsetBasic := PairSet_Basic[:0]
 	for _, r := range PairSet_Basic {
 		if CheckReachablePair(result.CallGraph, r) {
-			New_PairSet_Basic = append(New_PairSet_Basic, r)
+			ReachablePairsetBasic = append(ReachablePairsetBasic, r)
 		}
 	}
 
-	println("New Field Pair")
-	for i, r := range New_PairSet_Field {
+	println("Reachable Field Pair")
+	for i, r := range Reachable_PairSet_Field {
 		println(i, toString(pass, r[0].ins), "\n", toString(pass, r[1].ins))
 	}
 
-	println("New Array Pair")
-	for i, r := range New_PairSet_Array {
+	println("Reachable Array Pair")
+	for i, r := range ReachablePairSetArray {
 		println(i, toString(pass, r[0].ins), "\n", toString(pass, r[1].ins))
 	}
 
-	println("New Basic Pair")
-	for i, r := range New_PairSet_Basic {
+	println("Reachable Basic Pair")
+	for i, r := range ReachablePairsetBasic {
 		println(i, toString(pass, r[0].ins), "\n", toString(pass, r[1].ins))
 	}
 
@@ -188,20 +198,20 @@ func RacePairsAnalyzerRun(pass *analysis.Pass) (interface{}, error) {
 		Mains:          pkglist,
 		BuildCallGraph: true,
 	}
-	for _, r := range New_PairSet_Field {
+	for _, r := range Reachable_PairSet_Field {
 		if r[0].isAddr && r[1].isAddr {
 			config2.AddQuery(r[0].value)
 			config2.AddQuery(r[1].value)
 		}
 	}
 
-	for _, r := range New_PairSet_Array {
+	for _, r := range ReachablePairSetArray {
 		if r[0].isAddr && r[1].isAddr {
 			config2.AddQuery(r[0].value)
 			config2.AddQuery(r[1].value)
 		}
 	}
-	for _, r := range New_PairSet_Basic {
+	for _, r := range ReachablePairsetBasic {
 		if r[0].isAddr && r[1].isAddr {
 			config2.AddQuery(r[0].value)
 			config2.AddQuery(r[1].value)
@@ -214,34 +224,49 @@ func RacePairsAnalyzerRun(pass *analysis.Pass) (interface{}, error) {
 		panic(err) // internal error in pointer analysis
 	}
 
-	println("New Field Pair2")
-
-	for i, r := range New_PairSet_Field {
+	println("Alising Field Pair")
+	AlisingPairsetField := Reachable_PairSet_Field[:0]
+	for i, r := range Reachable_PairSet_Field {
 		if r[0].isAddr && r[1].isAddr && result2.Queries[r[0].value].PointsTo().Intersects(result2.Queries[r[1].value].PointsTo()) {
 			println(i, toString(pass, r[0].ins), "\n -", toString(pass, r[1].ins))
+			AlisingPairsetField = append(AlisingPairsetField, r)
 		} else {
 			println("Remove Pair", i)
 		}
 	}
-	println("New Field Pair2")
 
-	for i, r := range New_PairSet_Array {
+	println("Alising Array Pair")
+	AlisingPairsetArray := ReachablePairSetArray[:0]
+	for i, r := range ReachablePairSetArray {
 		if r[0].isAddr && r[1].isAddr && result2.Queries[r[0].value].PointsTo().Intersects(result2.Queries[r[1].value].PointsTo()) {
 			println(i, toString(pass, r[0].ins), "\n - ", toString(pass, r[1].ins))
+			AlisingPairsetArray = append(AlisingPairsetArray, r)
 		} else {
 			println("Remove Pair", i)
 		}
 	}
-	println("New Basic Pair2")
 
-	for i, r := range New_PairSet_Basic {
+	println("Alising Basic Pair")
+	AlisingPairsetBasic := ReachablePairsetBasic[:0]
+	for i, r := range ReachablePairsetBasic {
 		if r[0].isAddr && r[1].isAddr && result2.Queries[r[0].value].PointsTo().Intersects(result2.Queries[r[1].value].PointsTo()) {
 			println(i, toString(pass, r[0].ins), "\n - ", toString(pass, r[1].ins))
+			AlisingPairsetBasic = append(AlisingPairsetBasic, r)
 		} else {
 			println("Remove Pair", i)
 		}
 	}
 
+	for _, r := range AlisingPairsetField {
+		CheckHappendBefore(pass, result.CallGraph, r)
+	}
+
+	for _, r := range AlisingPairsetArray {
+		CheckHappendBefore(pass, result.CallGraph, r)
+	}
+	for _, r := range AlisingPairsetBasic {
+		CheckHappendBefore(pass, result.CallGraph, r)
+	}
 	return nil, nil
 }
 
@@ -250,7 +275,7 @@ func GenPair(RecordSet []RecordField) (ret [][2]RecordField) {
 		if pi := RecordSet[i]; pi.isWrite {
 			for j := range RecordSet {
 				if pj := RecordSet[j]; !pj.isWrite || i < j {
-					if reflect.DeepEqual(pi.value.Type(), pj.value.Type()) && pi.Field == pj.Field {
+					if reflect.DeepEqual(pi.value.Type(), pj.value.Type()) && pi.Field == pj.Field && (*pi.ins).Block() != (*pj.ins).Block() {
 						ret = append(ret, [2]RecordField{pi, pj})
 					}
 				}
@@ -384,7 +409,7 @@ func runFunc1(pass *analysis.Pass, fn *ssa.Function) {
 	}
 }
 
-type ContextList []*ssa.CallInstruction
+type ContextList []ssa.Instruction
 type SyncMutexItem struct {
 	value     ssa.Value
 	gocall    *ssa.CallCommon
@@ -404,22 +429,24 @@ func GenContextPath(cg *callgraph.Graph, end *callgraph.Node) (ret []ContextList
 		}
 		seen[node] = true
 		for _, p := range node.In {
-			dfs(p.Callee)
+			dfs(p.Caller)
 		}
 	}
-	dfs(cg.Root)
+	dfs(end)
 
 	var _MAX_DEEP_ = 30
 	var _MAX_ITEM_ = 10
 
 	var cl = make(ContextList, _MAX_DEEP_)
 	dfs2 = func(deep int, n *callgraph.Node) {
-		if !seen[n] || deep > _MAX_DEEP_ {
+		if !seen[n] || deep >= _MAX_DEEP_ {
 			return
 		}
-		if n == cg.Root {
-			var cl2 = make(ContextList, _MAX_DEEP_)
-			copy(cl2, cl)
+		if n == end {
+			var cl2 = make(ContextList, deep-1)
+			for i := 1; i < deep; i++ {
+				cl2[i-1] = cl[i]
+			}
 			ret = append(ret, cl2)
 			if len(ret) >= _MAX_ITEM_ {
 				_MAX_DEEP_ = 0
@@ -428,12 +455,20 @@ func GenContextPath(cg *callgraph.Graph, end *callgraph.Node) (ret []ContextList
 		}
 		seen[n] = false
 		for _, p := range n.Out {
-			cl[deep] = &p.Site
+			switch x := p.Site.(type) {
+			case *ssa.Go:
+				cl[deep] = x
+			case *ssa.Call:
+				cl[deep] = x
+			case *ssa.Defer:
+
+			}
+
 			dfs2(deep+1, p.Callee)
 		}
 		seen[n] = true
 	}
-	dfs2(0, end)
+	dfs2(0, cg.Root)
 	return ret
 }
 
@@ -486,7 +521,7 @@ func GetSyncValue(instr *ssa.Instruction) (ret SyncMutexList) {
 			}
 		}
 	case *ssa.Go:
-		return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 30, true}} //30 for GoCall
+		return SyncMutexList{SyncMutexItem{nil, &ins.Call, 30, false}} //30 for GoCall
 	}
 	return nil
 }
@@ -498,13 +533,12 @@ func GetBefore(start ssa.Instruction) (sync SyncMutexList) {
 
 	for bb != nil {
 		for i := len(bb.Instrs) - 1; i >= 0; i-- {
-			if !match && reflect.DeepEqual(bb.Instrs[i], start) {
-				match = true
-			}
 			if match {
 				if tmp := GetSyncValue(&bb.Instrs[i]); tmp != nil {
 					sync = append(sync, tmp...)
 				}
+			} else {
+				match = reflect.DeepEqual(bb.Instrs[i], start)
 			}
 		}
 		bb = bb.Idom()
@@ -523,13 +557,12 @@ func GetAfter(start ssa.Instruction) (sync SyncMutexList) {
 	for i := 0; i < len(que); i++ {
 		bb = que[i]
 		for i := range bb.Instrs {
-			if !match && reflect.DeepEqual(bb.Instrs[i], start) {
-				match = true
-			}
 			if match {
 				if tmp := GetSyncValue(&bb.Instrs[i]); tmp != nil {
 					sync = append(sync, tmp...)
 				}
+			} else {
+				match = reflect.DeepEqual(bb.Instrs[i], start)
 			}
 		}
 		for _, succ := range bb.Succs {
@@ -554,12 +587,11 @@ func FilterDefer(buf SyncMutexList) (bf, af SyncMutexList) {
 }
 
 func GetBeforeAfertSet(cl ContextList) [2]SyncMutexList {
-	var tmp SyncMutexList
 	seenGo := false
 	var BeforeSet, AfterSet SyncMutexList
 	for j := len(cl) - 1; j >= 0; j-- {
-		ins := *cl[j]
-		tmp = append(tmp, GetBefore(ins)...)
+		ins := cl[j]
+		tmp := GetBefore(ins)
 		if _, isGo := ins.(*ssa.Go); seenGo || isGo {
 			seenGo = true
 		}
@@ -575,7 +607,7 @@ func GetBeforeAfertSet(cl ContextList) [2]SyncMutexList {
 
 func FindGoCallInAfterSet(ctx1 ContextList, afterSet SyncMutexList) bool {
 	for _, call := range ctx1 {
-		call2, isgo := (*call).(*ssa.Go)
+		call2, isgo := call.(*ssa.Go)
 		if !isgo {
 			continue
 		}
@@ -603,7 +635,7 @@ func HappensBeforeFromSet(beforeList SyncMutexList, afterList SyncMutexList) boo
 
 	// Find Wg
 	for _, itemB := range beforeList {
-		if itemB.op < 20 { // is a Wg.Wait
+		if itemB.op == 20 { // is a Wg.Wait
 			for _, itemA := range afterList {
 				if itemA.op == 21 && FastSame(&itemA.value, &itemB.value) { // is a Wg.Done
 					return true
@@ -615,16 +647,40 @@ func HappensBeforeFromSet(beforeList SyncMutexList, afterList SyncMutexList) boo
 	return false
 }
 
-func CheckHappendBefore(cg *callgraph.Graph, field [2]RecordField) int {
+func PrintCtx(pass *analysis.Pass, ctx ContextList) {
+	for i, c := range ctx {
+		println("\t#", i, (*pass.Fset).Position(c.Pos()).String(), c.String())
+	}
+}
+
+func ReportRaceWithCtx(pass *analysis.Pass, field [2]RecordField, ctx [2]ContextList) {
+	println("Race Found:[ZZZ]")
+	println(toString(pass, field[0].ins))
+	PrintCtx(pass, ctx[0])
+	println("============")
+	println(toString(pass, field[1].ins))
+	PrintCtx(pass, ctx[1])
+	println("============")
+}
+
+func CheckHappendBefore(pass *analysis.Pass, cg *callgraph.Graph, field [2]RecordField) {
 	node1 := cg.Nodes[(*field[0].ins).Parent()]
 	node2 := cg.Nodes[(*field[1].ins).Parent()]
 
 	if node1 == nil || node2 == nil {
-		return 0
+		return
 	}
 
 	contextlist1 := GenContextPath(cg, node1)
+	for i := range contextlist1 {
+		contextlist1[i] = append(contextlist1[i], *field[0].ins)
+	}
+
 	contextlist2 := GenContextPath(cg, node2)
+	for i := range contextlist2 {
+		contextlist2[i] = append(contextlist2[i], *field[1].ins)
+	}
+
 	var BASet1, BASet2 [][2]SyncMutexList
 
 	for i := range contextlist1 {
@@ -645,7 +701,7 @@ func CheckHappendBefore(cg *callgraph.Graph, field [2]RecordField) int {
 			if FindGoCallInAfterSet(ctx1, set2[1]) {
 				flag = 1
 			}
-
+			//Find Go2 in Afterset1
 			if FindGoCallInAfterSet(ctx2, set1[1]) {
 				flag = -1
 			}
@@ -659,12 +715,11 @@ func CheckHappendBefore(cg *callgraph.Graph, field [2]RecordField) int {
 			}
 
 			if flag == 0 {
-				//report race with ctx
-				return 0
+				ReportRaceWithCtx(pass, field, [2]ContextList{ctx1, ctx2})
+				return
 			}
 		}
 	}
-	return 0
 }
 
 func main() {
