@@ -489,7 +489,7 @@ func GetSyncValue(instr *ssa.Instruction) (ret SyncMutexList) {
 			return SyncMutexList{SyncMutexItem{ins.X, nil, 2, false}} //2 for recv
 		}
 	case *ssa.Call:
-		sig := ins.Call.Signature().String()
+		sig := ins.Call.Value.String()
 		switch sig {
 		//case "(*sync.Mutex).Lock":
 		//	return SyncMutexList{SyncMutexItem{value:ins.Call.Args[0],deferCall:false,op:10}} //10 for Lock
@@ -499,13 +499,13 @@ func GetSyncValue(instr *ssa.Instruction) (ret SyncMutexList) {
 			return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 20, false}} //20 for Done
 		case "(*sync.WaitGroup).Wait":
 			return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 21, false}} //21 for Wait
-		case "close":
+		case "builtin close":
 			if _, ischen := ins.Call.Args[0].Type().(*types.Chan); ischen {
 				return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 3, false}} //21 for close chan
 			}
 		}
 	case *ssa.Defer:
-		sig := ins.Call.Signature().String()
+		sig := ins.Call.Value.String()
 		switch sig {
 		//case "(*sync.Mutex).Lock":
 		//	panic("Call Lock in defer???")
@@ -515,7 +515,7 @@ func GetSyncValue(instr *ssa.Instruction) (ret SyncMutexList) {
 			return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 20, true}} //20 for Done
 		case "(*sync.WaitGroup).Wait":
 			return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 21, true}} //21 for Wait
-		case "close":
+		case "builtin close":
 			if _, ischen := ins.Call.Args[0].Type().(*types.Chan); ischen {
 				return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 3, true}} //21 for close chan
 			}
@@ -605,14 +605,48 @@ func GetBeforeAfertSet(cl ContextList) [2]SyncMutexList {
 	return [2]SyncMutexList{BeforeSet, AfterSet}
 }
 
-func FindGoCallInAfterSet(ctx1 ContextList, afterSet SyncMutexList) bool {
+func CheckReachableInstr(start, end ssa.Instruction) bool {
+	if start.Block().Parent() != end.Block().Parent() {
+		return false
+	}
+	bb := start.Block()
+	match := false
+
+	var que []*ssa.BasicBlock
+	var seen = make(map[*ssa.BasicBlock]bool)
+	que = append(que, bb)
+	seen[bb] = true
+	for i := 0; i < len(que); i++ {
+		bb = que[i]
+		for i := range bb.Instrs {
+			if match && reflect.DeepEqual(bb.Instrs[i], end) {
+				return true
+			} else {
+				if !match && reflect.DeepEqual(bb.Instrs[i], start) {
+					match = true
+					// clean seen map, re-visit every block
+					seen = make(map[*ssa.BasicBlock]bool)
+				}
+			}
+		}
+		for _, succ := range bb.Succs {
+			if !seen[succ] {
+				seen[succ] = true
+				que = append(que, succ)
+			}
+		}
+	}
+	return false
+}
+
+func FindGoCallInAfterSet(ctx1 ContextList, afterSet SyncMutexList, instr2 *ssa.Instruction) bool {
 	for _, call := range ctx1 {
 		call2, isgo := call.(*ssa.Go)
 		if !isgo {
 			continue
 		}
 		for _, item := range afterSet {
-			if item.gocall != nil && item.gocall == (*call2).Common() {
+			if item.gocall != nil && item.gocall == (*call2).Common() && !CheckReachableInstr(call, *instr2) {
 				return true
 			}
 		}
@@ -635,9 +669,9 @@ func HappensBeforeFromSet(beforeList SyncMutexList, afterList SyncMutexList) boo
 
 	// Find Wg
 	for _, itemB := range beforeList {
-		if itemB.op == 20 { // is a Wg.Wait
+		if itemB.op == 21 { // is a Wg.Wait
 			for _, itemA := range afterList {
-				if itemA.op == 21 && FastSame(&itemA.value, &itemB.value) { // is a Wg.Done
+				if itemA.op == 20 && FastSame(&itemA.value, &itemB.value) { // is a Wg.Done
 					return true
 				}
 			}
@@ -698,20 +732,24 @@ func CheckHappendBefore(pass *analysis.Pass, cg *callgraph.Graph, field [2]Recor
 
 			flag := 0
 			//Find Go1 in Afterset2
-			if FindGoCallInAfterSet(ctx1, set2[1]) {
+			if FindGoCallInAfterSet(ctx1, set2[1], field[1].ins) {
 				flag = 1
+				continue
 			}
 			//Find Go2 in Afterset1
-			if FindGoCallInAfterSet(ctx2, set1[1]) {
+			if FindGoCallInAfterSet(ctx2, set1[1], field[0].ins) {
 				flag = -1
+				continue
 			}
 
 			if HappensBeforeFromSet(set1[0], set2[1]) {
 				flag = 1
+				continue
 			}
 
 			if HappensBeforeFromSet(set2[0], set1[1]) {
 				flag = -1
+				continue
 			}
 
 			if flag == 0 {
