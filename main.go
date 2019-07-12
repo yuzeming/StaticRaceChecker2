@@ -73,10 +73,12 @@ func FastSame(a *ssa.Value, b *ssa.Value) bool {
 var RecordSet_Field []RecordField
 var RecordSet_Array []RecordField
 var RecordSet_Basic []RecordField
+var RecordSet_Map []RecordField
 
 var PairSet_Field [][2]RecordField
 var PairSet_Array [][2]RecordField
 var PairSet_Basic [][2]RecordField
+var PairSet_Map [][2]RecordField
 
 func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 	println("Pass run")
@@ -125,11 +127,17 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 		for i, r := range RecordSet_Basic {
 			println(i, toString(prog, r.ins), (*r.ins).String(), r.value.String(), r.isWrite)
 		}
+
+		println("Map")
+		for i, r := range RecordSet_Map {
+			println(i, toString(prog, r.ins), (*r.ins).String(), r.value.String(), r.isWrite)
+		}
 	}
 
 	PairSet_Field = GenPair(RecordSet_Field, true)
 	PairSet_Array = GenPair(RecordSet_Array, true)
 	PairSet_Basic = GenPair(RecordSet_Basic, true)
+	PairSet_Map = GenPair(RecordSet_Map, true)
 
 	if _debug_print_ {
 		println("Field Pair")
@@ -144,6 +152,11 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 
 		println("Basic Pair")
 		for i, r := range PairSet_Basic {
+			println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
+		}
+
+		println("Map Pair")
+		for i, r := range PairSet_Map {
 			println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
 		}
 	}
@@ -208,6 +221,13 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 		}
 	}
 
+	ReachablePairsetMap := PairSet_Map[:0]
+	for _, r := range PairSet_Map {
+		if CheckReachablePair(result.CallGraph, r) {
+			ReachablePairsetMap = append(ReachablePairsetMap, r)
+		}
+	}
+
 	if _debug_print_ {
 		println("Reachable Field Pair")
 		for i, r := range Reachable_PairSet_Field {
@@ -221,6 +241,11 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 
 		println("Reachable Basic Pair")
 		for i, r := range ReachablePairsetBasic {
+			println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
+		}
+
+		println("Reachable Map Pair")
+		for i, r := range ReachablePairsetMap {
 			println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
 		}
 	}
@@ -243,6 +268,13 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 		}
 	}
 	for _, r := range ReachablePairsetBasic {
+		if r[0].isAddr && r[1].isAddr {
+			config2.AddQuery(r[0].value)
+			config2.AddQuery(r[1].value)
+		}
+	}
+
+	for _, r := range ReachablePairsetMap {
 		if r[0].isAddr && r[1].isAddr {
 			config2.AddQuery(r[0].value)
 			config2.AddQuery(r[1].value)
@@ -288,6 +320,17 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 		}
 	}
 
+	println("Alising Map Pair")
+	AlisingPairsetMap := ReachablePairsetMap[:0]
+	for i, r := range ReachablePairsetMap {
+		if r[0].isAddr && r[1].isAddr && result2.Queries[r[0].value].PointsTo().Intersects(result2.Queries[r[1].value].PointsTo()) {
+			println(i, toString(prog, r[0].ins), "\n - ", toString(prog, r[1].ins))
+			AlisingPairsetMap = append(AlisingPairsetMap, r)
+		} else {
+			println("Remove Pair", i)
+		}
+	}
+
 	for _, r := range AlisingPairsetField {
 		CheckHappendBefore(prog, result.CallGraph, r)
 	}
@@ -296,6 +339,10 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 		CheckHappendBefore(prog, result.CallGraph, r)
 	}
 	for _, r := range AlisingPairsetBasic {
+		CheckHappendBefore(prog, result.CallGraph, r)
+	}
+
+	for _, r := range AlisingPairsetMap {
 		CheckHappendBefore(prog, result.CallGraph, r)
 	}
 }
@@ -316,6 +363,8 @@ func GenPair(RecordSet []RecordField, skipfastcheck bool) (ret [][2]RecordField)
 }
 
 func CheckReachablePair(cg *callgraph.Graph, field [2]RecordField) bool {
+	println((*field[0].ins).Parent().Name(), (*field[1].ins).Parent().Name())
+
 	node1 := cg.Nodes[(*field[0].ins).Parent()]
 	node2 := cg.Nodes[(*field[1].ins).Parent()]
 
@@ -418,6 +467,30 @@ func analysisInstrs(instrs *ssa.Instruction) {
 		for i := range ins.Bindings {
 			AddFreeVarMap(freevar[i], &ins.Bindings[i])
 		}
+
+	case *ssa.Call:
+		fn := ins.Call.Value.String()
+		switch fn {
+		case "builtin delete": // map delete
+			tmp := RecordField{instrs, ins.Call.Args[0], 0, true, true}
+			RecordSet_Map = append(RecordSet_Map, tmp)
+		case "(*os.File).Read": // file read
+			fallthrough
+		case "(*os.File).Write":
+			// TODO Add dst read write record
+			fallthrough
+		case "(*os.File).Close":
+			tmp := RecordField{instrs, ins.Call.Args[0], 0, true, true}
+			RecordSet_Basic = append(RecordSet_Basic, tmp)
+		}
+	case *ssa.MapUpdate:
+		tmp := RecordField{instrs, ins.Map, 0, true, true}
+		RecordSet_Map = append(RecordSet_Map, tmp)
+	case *ssa.Lookup:
+		if ins.X.Type().String() == "map" {
+			tmp := RecordField{instrs, ins.X, 0, true, false}
+			RecordSet_Map = append(RecordSet_Map, tmp)
+		}
 	default:
 	}
 }
@@ -446,6 +519,7 @@ func runFunc1(fn *ssa.Function) {
 			case *ssa.FieldAddr:
 			case *ssa.Index:
 			case *ssa.IndexAddr:
+			case *ssa.Call:
 
 			default:
 				tmp := RecordField{&ref[i], freevar, 0, true, isWrite(ref[i], freevar)}
@@ -549,6 +623,8 @@ func GetSyncValue(instr *ssa.Instruction) (ret SyncMutexList) {
 			if _, ischen := ins.Call.Args[0].Type().(*types.Chan); ischen {
 				return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 3, false}} //21 for close chan
 			}
+		default:
+			return SyncMutexList{SyncMutexItem{nil, &ins.Call, 31, false}} //31 for normal call
 		}
 	case *ssa.Defer:
 		sig := ins.Call.Value.String()
@@ -688,14 +764,22 @@ func CheckReachableInstr(start, end ssa.Instruction) bool {
 func FindGoCallInAfterSet(ctx1 ContextList, afterSet SyncMutexList, instr2 *ssa.Instruction) bool {
 	for _, call := range ctx1 {
 		call2, isgo := call.(*ssa.Go)
-		if !isgo {
-			continue
-		}
-		for _, item := range afterSet {
-			if item.gocall != nil && item.gocall == (*call2).Common() && !CheckReachableInstr(call, *instr2) {
-				return true
+		if isgo {
+			for _, item := range afterSet {
+				if item.gocall != nil && item.gocall == (*call2).Common() && !CheckReachableInstr(call, *instr2) {
+					return true
+				}
 			}
 		}
+		call3, iscall := call.(*ssa.Call)
+		if iscall {
+			for _, item := range afterSet {
+				if item.gocall != nil && item.gocall == (*call3).Common() && !CheckReachableInstr(call, *instr2) {
+					return true
+				}
+			}
+		}
+
 	}
 	return false
 }
@@ -820,7 +904,7 @@ func CheckHappendBefore(prog *ssa.Program, cg *callgraph.Graph, field [2]RecordF
 }
 
 func main() {
-	cfg := packages.Config{Mode: packages.LoadAllSyntax, Tests: true}
+	cfg := packages.Config{Mode: packages.LoadAllSyntax, Tests: false}
 	initial, err := packages.Load(&cfg, os.Args[1])
 	if err != nil {
 		log.Fatal(err)
