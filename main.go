@@ -13,7 +13,10 @@ import (
 	"os"
 	"reflect"
 	"sort"
+	"strings"
 )
+
+const _debug_print_ = true
 
 type RecordField struct {
 	ins     *ssa.Instruction
@@ -80,18 +83,25 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 
 	var FuncsList []*ssa.Function
 
+	fn_seen := make(map[string]bool)
 	for _, pkg := range pkgs {
-		for _, v := range pkg.Members {
-			f, ok := v.(*ssa.Function)
-			if ok {
-				var addAnons func(f *ssa.Function)
-				addAnons = func(f *ssa.Function) {
-					FuncsList = append(FuncsList, f)
-					for _, anon := range f.AnonFuncs {
-						addAnons(anon)
+		if pkg != nil {
+			for _, v := range pkg.Members {
+				f, ok := v.(*ssa.Function)
+				if ok && f.Name() != "init" {
+					var addAnons func(f *ssa.Function)
+					addAnons = func(f *ssa.Function) {
+						fullfn := pkg.Pkg.Path() + "@" + f.Name()
+						if !fn_seen[fullfn] && !strings.HasPrefix(f.Name(), "init#") {
+							fn_seen[fullfn] = true
+							FuncsList = append(FuncsList, f)
+							for _, anon := range f.AnonFuncs {
+								addAnons(anon)
+							}
+						}
 					}
+					addAnons(f)
 				}
-				addAnons(f)
 			}
 		}
 	}
@@ -100,47 +110,53 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 		runFunc1(fn)
 	}
 
-	println("Field")
-	for i, r := range RecordSet_Field {
-		println(i, toString(prog, r.ins))
+	if _debug_print_ {
+		println("Field")
+		for i, r := range RecordSet_Field {
+			println(i, toString(prog, r.ins))
+		}
+
+		println("Array")
+		for i, r := range RecordSet_Array {
+			println(i, toString(prog, r.ins), (*r.ins).String(), r.value.String(), r.isWrite)
+		}
+
+		println("Basic")
+		for i, r := range RecordSet_Basic {
+			println(i, toString(prog, r.ins), (*r.ins).String(), r.value.String(), r.isWrite)
+		}
 	}
 
-	println("Array")
-	for i, r := range RecordSet_Array {
-		println(i, toString(prog, r.ins), (*r.ins).String(), r.value.String(), r.isWrite)
-	}
+	PairSet_Field = GenPair(RecordSet_Field, true)
+	PairSet_Array = GenPair(RecordSet_Array, true)
+	PairSet_Basic = GenPair(RecordSet_Basic, true)
 
-	println("Basic")
-	for i, r := range RecordSet_Basic {
-		println(i, toString(prog, r.ins), (*r.ins).String(), r.value.String(), r.isWrite)
-	}
+	if _debug_print_ {
+		println("Field Pair")
+		for i, r := range PairSet_Field {
+			println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
+		}
 
-	PairSet_Field = GenPair(RecordSet_Field)
-	PairSet_Array = GenPair(RecordSet_Array)
-	PairSet_Basic = GenPair(RecordSet_Basic)
+		println("Array Pair")
+		for i, r := range PairSet_Array {
+			println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
+		}
 
-	println("Field Pair")
-	for i, r := range PairSet_Field {
-		println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
-	}
-
-	println("Array Pair")
-	for i, r := range PairSet_Array {
-		println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
-	}
-
-	println("Basic Pair")
-	for i, r := range PairSet_Basic {
-		println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
+		println("Basic Pair")
+		for i, r := range PairSet_Basic {
+			println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
+		}
 	}
 
 	var mainpkgs []*ssa.Package
 	for _, pkg := range pkgs {
-		if pkg.Func("main") != nil {
-			mainpkgs = append(mainpkgs, pkg)
-		}
-		if testpkg := prog.CreateTestMainPackage(pkg); testpkg != nil {
-			mainpkgs = append(mainpkgs, testpkg)
+		if pkg != nil {
+			if pkg.Func("main") != nil {
+				mainpkgs = append(mainpkgs, pkg)
+			}
+			if testpkg := prog.CreateTestMainPackage(pkg); testpkg != nil {
+				mainpkgs = append(mainpkgs, testpkg)
+			}
 		}
 	}
 
@@ -154,23 +170,23 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 	if err != nil {
 		panic(err) // internal error in pointer analysis
 	}
+	if false {
+		var edges []string
+		_ = callgraph.GraphVisitEdges(result.CallGraph, func(edge *callgraph.Edge) error {
+			caller := edge.Caller.Func
+			edges = append(edges, fmt.Sprint(caller, " --> ", edge.Callee.Func))
+			return nil
+		})
 
-	var edges []string
-	_ = callgraph.GraphVisitEdges(result.CallGraph, func(edge *callgraph.Edge) error {
-		caller := edge.Caller.Func
-		edges = append(edges, fmt.Sprint(caller, " --> ", edge.Callee.Func))
-		return nil
-	})
-
-	// Print the edges in sorted order.
-	sort.Strings(edges)
-	for _, edge := range edges {
-		fmt.Println(edge)
+		// Print the edges in sorted order.
+		sort.Strings(edges)
+		for _, edge := range edges {
+			fmt.Println(edge)
+		}
 	}
 
 	fmt.Println()
 
-	println("Field Pair")
 	Reachable_PairSet_Field := PairSet_Field[:0]
 	for _, r := range PairSet_Field {
 		if CheckReachablePair(result.CallGraph, r) {
@@ -178,7 +194,6 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 		}
 	}
 
-	println("Array Pair")
 	ReachablePairSetArray := PairSet_Array[:0]
 	for _, r := range PairSet_Array {
 		if CheckReachablePair(result.CallGraph, r) {
@@ -186,7 +201,6 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 		}
 	}
 
-	println("Basic Pair")
 	ReachablePairsetBasic := PairSet_Basic[:0]
 	for _, r := range PairSet_Basic {
 		if CheckReachablePair(result.CallGraph, r) {
@@ -194,19 +208,21 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 		}
 	}
 
-	println("Reachable Field Pair")
-	for i, r := range Reachable_PairSet_Field {
-		println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
-	}
+	if _debug_print_ {
+		println("Reachable Field Pair")
+		for i, r := range Reachable_PairSet_Field {
+			println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
+		}
 
-	println("Reachable Array Pair")
-	for i, r := range ReachablePairSetArray {
-		println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
-	}
+		println("Reachable Array Pair")
+		for i, r := range ReachablePairSetArray {
+			println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
+		}
 
-	println("Reachable Basic Pair")
-	for i, r := range ReachablePairsetBasic {
-		println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
+		println("Reachable Basic Pair")
+		for i, r := range ReachablePairsetBasic {
+			println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
+		}
 	}
 
 	config2 := &pointer.Config{
@@ -284,12 +300,12 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 	}
 }
 
-func GenPair(RecordSet []RecordField) (ret [][2]RecordField) {
+func GenPair(RecordSet []RecordField, skipfastcheck bool) (ret [][2]RecordField) {
 	for i := range RecordSet {
 		if pi := RecordSet[i]; pi.isWrite {
 			for j := range RecordSet {
 				if pj := RecordSet[j]; !pj.isWrite || i < j {
-					if reflect.DeepEqual(pi.value.Type(), pj.value.Type()) && pi.Field == pj.Field && (*pi.ins).Block() != (*pj.ins).Block() {
+					if reflect.DeepEqual(pi.value.Type(), pj.value.Type()) && pi.Field == pj.Field && (*pi.ins).Block() != (*pj.ins).Block() && (skipfastcheck || FastSame(&pi.value, &pj.value)) {
 						ret = append(ret, [2]RecordField{pi, pj})
 					}
 				}
@@ -375,12 +391,26 @@ func analysisInstrs(instrs *ssa.Instruction) {
 			RecordSet_Array = append(RecordSet_Array, tmp)
 		}
 	case *ssa.Alloc:
-		if p, ok := ins.Type().Underlying().(*types.Pointer).Elem().(*types.Basic); ok && ins.Heap {
-			println(p.Name())
+		elem := ins.Type().Underlying().(*types.Pointer).Elem()
+		if _, ok := elem.(*types.Basic); ok && ins.Heap {
 			ref := *ins.Referrers()
 			for i := range ref {
 				tmp := RecordField{&ref[i], ins, 0, true, isWrite(ref[i], ins)}
 				RecordSet_Basic = append(RecordSet_Basic, tmp)
+			}
+		}
+		if _, ok := elem.(*types.Array); ok && ins.Heap {
+			ref := *ins.Referrers()
+			for i := range ref {
+				tmp := RecordField{&ref[i], ins, 0, true, isWrite(ref[i], ins)}
+				RecordSet_Array = append(RecordSet_Array, tmp)
+			}
+		}
+		if _, ok := elem.(*types.Struct); ok && ins.Heap {
+			ref := *ins.Referrers()
+			for i := range ref {
+				tmp := RecordField{&ref[i], ins, 0, true, isWrite(ref[i], ins)}
+				RecordSet_Field = append(RecordSet_Field, tmp)
 			}
 		}
 	case *ssa.MakeClosure:
@@ -403,7 +433,9 @@ func visitBasicBlock(fnname string, bb *ssa.BasicBlock) {
 
 func runFunc1(fn *ssa.Function) {
 	fnname := fn.String()
-	println(fnname)
+	if _debug_print_ {
+		println("runFunc1", fnname)
+	}
 	visitBasicBlock(fnname, fn.Blocks[0])
 
 	for _, freevar := range fn.FreeVars {
@@ -703,12 +735,21 @@ func PrintCtx(prog *ssa.Program, ctx ContextList) {
 
 func ReportRaceWithCtx(prog *ssa.Program, field [2]RecordField, ctx [2]ContextList) {
 	println("Race Found:[ZZZ]")
-	println(toString(prog, field[0].ins))
+	println(toString(prog, field[0].ins), "Func:", (*field[0].ins).Parent().Name())
 	PrintCtx(prog, ctx[0])
 	println("============")
-	println(toString(prog, field[1].ins))
+	println(toString(prog, field[1].ins), "Func:", (*field[1].ins).Parent().Name())
 	PrintCtx(prog, ctx[1])
 	println("============")
+}
+
+func hasGoCall(ctx ContextList) bool {
+	for i := range ctx {
+		if _, ok := ctx[i].(*ssa.Go); ok {
+			return true
+		}
+	}
+	return false
 }
 
 func CheckHappendBefore(prog *ssa.Program, cg *callgraph.Graph, field [2]RecordField) {
@@ -744,6 +785,10 @@ func CheckHappendBefore(prog *ssa.Program, cg *callgraph.Graph, field [2]RecordF
 		for j, set2 := range BASet2 {
 			ctx2 := contextlist2[j]
 
+			if !hasGoCall(ctx1) && !hasGoCall(ctx2) {
+				continue
+			}
+
 			flag := 0
 			//Find Go1 in Afterset2
 			if FindGoCallInAfterSet(ctx1, set2[1], field[1].ins) {
@@ -775,15 +820,14 @@ func CheckHappendBefore(prog *ssa.Program, cg *callgraph.Graph, field [2]RecordF
 }
 
 func main() {
-	cfg := packages.Config{Mode: packages.LoadAllSyntax | packages.NeedImports, Tests: true}
+	cfg := packages.Config{Mode: packages.LoadAllSyntax, Tests: true}
 	initial, err := packages.Load(&cfg, os.Args[1])
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	// Create SSA packages for well-typed packages and their dependencies.
-	prog, pkgs := ssautil.AllPackages(initial, ssa.PrintPackages)
-	_ = pkgs
+	prog, pkgs := ssautil.AllPackages(initial, 0)
 
 	// Build SSA code for the whole program.
 	prog.Build()
