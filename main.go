@@ -467,7 +467,6 @@ func analysisInstrs(instrs *ssa.Instruction) {
 		for i := range ins.Bindings {
 			AddFreeVarMap(freevar[i], &ins.Bindings[i])
 		}
-
 	case *ssa.Call:
 		fn := ins.Call.Value.String()
 		switch fn {
@@ -487,10 +486,8 @@ func analysisInstrs(instrs *ssa.Instruction) {
 		tmp := RecordField{instrs, ins.Map, 0, true, true}
 		RecordSet_Map = append(RecordSet_Map, tmp)
 	case *ssa.Lookup:
-		if ins.X.Type().String() == "map" {
-			tmp := RecordField{instrs, ins.X, 0, true, false}
-			RecordSet_Map = append(RecordSet_Map, tmp)
-		}
+		tmp := RecordField{instrs, ins.X, 0, true, false}
+		RecordSet_Map = append(RecordSet_Map, tmp)
 	default:
 	}
 }
