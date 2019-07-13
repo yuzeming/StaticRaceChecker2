@@ -19,7 +19,7 @@ import (
 const _debug_print_ = true
 const _MAX_CTX_DEEP_ = 30
 const _MAX_CTX_NUM = 10
-const _IGNORE_TIMEOUT = true
+const _IGNORE_TIMEOUT = false
 
 type RecordField struct {
 	ins      *ssa.Instruction
@@ -90,7 +90,9 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 	var FuncsList []*ssa.Function
 
 	fn_seen := make(map[string]bool)
-	for _, pkg := range pkgs {
+	for ipkg := len(pkgs) - 1; ipkg > 0; ipkg-- {
+		pkg := pkgs[ipkg]
+
 		if pkg != nil {
 			for _, v := range pkg.Members {
 				f, ok := v.(*ssa.Function)
@@ -99,7 +101,7 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 					addAnons = func(f *ssa.Function) {
 						fullfn := pkg.Pkg.Path() + "@" + f.Name()
 						if !fn_seen[fullfn] && !strings.HasPrefix(f.Name(), "init#") {
-							//fn_seen[fullfn] = true
+							fn_seen[fullfn] = true
 							FuncsList = append(FuncsList, f)
 							for _, anon := range f.AnonFuncs {
 								addAnons(anon)
@@ -503,6 +505,15 @@ func analysisInstrs(instrs *ssa.Instruction) {
 			case "builtin delete": // map delete
 				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, true, false}
 				RecordSet_Map = append(RecordSet_Map, tmp)
+			case "builtin append":
+				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, true, false}
+				RecordSet_Array = append(RecordSet_Array, tmp)
+				//var2 :=ins.Call.Args[1]
+				//switch var2.(type) {
+				//case *ssa.
+				//}
+				tmp2 := RecordField{instrs, ins.Call.Args[1], 0, true, false, false}
+				RecordSet_Array = append(RecordSet_Array, tmp2)
 			case "(*os.File).Write", "(*os.File).Read":
 				// TODO Add dst read write record
 				fallthrough
@@ -944,6 +955,10 @@ func main() {
 	initial, err := packages.Load(&cfg, os.Args[1])
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	if packages.PrintErrors(initial) > 0 {
+		return
 	}
 
 	// Create SSA packages for well-typed packages and their dependencies.
