@@ -364,6 +364,10 @@ func isInAnnoFunc(ins *ssa.Instruction) bool {
 	return (*ins).Parent().Parent() != nil
 }
 
+func hasPos(ins *ssa.Instruction) bool {
+	return (*ins).Pos() != token.NoPos
+}
+
 func GenPair(RecordSet []RecordField) (ret [][2]RecordField) {
 	for i := range RecordSet {
 		if pi := RecordSet[i]; pi.isWrite {
@@ -374,7 +378,8 @@ func GenPair(RecordSet []RecordField) (ret [][2]RecordField) {
 						(*pi.ins).Block() != (*pj.ins).Block() &&
 						(!pi.isAtomic || !pj.isAtomic) &&
 						(!_ReqOneInAnnoFunc_ || isInAnnoFunc(pi.ins) || isInAnnoFunc(pj.ins)) &&
-						(!_ReqFastSame_ || FastSame(&pi.value, &pj.value)) {
+						(!_ReqFastSame_ || FastSame(&pi.value, &pj.value)) &&
+						hasPos(pi.ins) && hasPos((pj.ins)) {
 						ret = append(ret, [2]RecordField{pi, pj})
 					}
 				}
