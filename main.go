@@ -17,9 +17,10 @@ import (
 )
 
 const _debug_print_ = true
-const _MAX_CTX_DEEP_ = 30
+const _MAX_CTX_DEEP_ = 100
 const _MAX_CTX_NUM = 10
 const _IGNORE_TIMEOUT = false
+const _ReqOneInAnnoFunc_ = true
 
 type RecordField struct {
 	ins      *ssa.Instruction
@@ -103,6 +104,9 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 						if !fn_seen[fullfn] && !strings.HasPrefix(f.Name(), "init#") {
 							fn_seen[fullfn] = true
 							FuncsList = append(FuncsList, f)
+							if f.Blocks == nil {
+								println("[ZZZ] empty blocks", f.Name())
+							}
 							for _, anon := range f.AnonFuncs {
 								addAnons(anon)
 							}
@@ -140,10 +144,10 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 		}
 	}
 
-	PairSet_Field = GenPair(RecordSet_Field, true)
-	PairSet_Array = GenPair(RecordSet_Array, true)
-	PairSet_Basic = GenPair(RecordSet_Basic, true)
-	PairSet_Map = GenPair(RecordSet_Map, true)
+	PairSet_Field = GenPair(RecordSet_Field)
+	PairSet_Array = GenPair(RecordSet_Array)
+	PairSet_Basic = GenPair(RecordSet_Basic)
+	PairSet_Map = GenPair(RecordSet_Map)
 
 	if _debug_print_ {
 		println("Field Pair")
@@ -353,12 +357,20 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 	}
 }
 
-func GenPair(RecordSet []RecordField, skipfastcheck bool) (ret [][2]RecordField) {
+func isInAnnoFunc(ins *ssa.Instruction) bool {
+	return (*ins).Parent().Parent() != nil
+}
+
+func GenPair(RecordSet []RecordField) (ret [][2]RecordField) {
 	for i := range RecordSet {
 		if pi := RecordSet[i]; pi.isWrite {
 			for j := range RecordSet {
 				if pj := RecordSet[j]; !pj.isWrite || i < j {
-					if reflect.DeepEqual(pi.value.Type(), pj.value.Type()) && pi.Field == pj.Field && (*pi.ins).Block() != (*pj.ins).Block() && (skipfastcheck || FastSame(&pi.value, &pj.value)) && (!pi.isAtomic || !pj.isAtomic) {
+					if reflect.DeepEqual(pi.value.Type(), pj.value.Type()) &&
+						pi.Field == pj.Field &&
+						(*pi.ins).Block() != (*pj.ins).Block() &&
+						(!pi.isAtomic || !pj.isAtomic) &&
+						(!_ReqOneInAnnoFunc_ || isInAnnoFunc(pi.ins) || isInAnnoFunc(pj.ins)) {
 						ret = append(ret, [2]RecordField{pi, pj})
 					}
 				}
