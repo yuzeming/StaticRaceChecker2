@@ -21,6 +21,7 @@ const _MAX_CTX_DEEP_ = 100
 const _MAX_CTX_NUM = 10
 const _IGNORE_TIMEOUT = false
 const _ReqOneInAnnoFunc_ = true
+const _ReqFastSame_ = true
 
 type RecordField struct {
 	ins      *ssa.Instruction
@@ -58,6 +59,8 @@ func LockupFreeVar(a *ssa.FreeVar) (ret *ssa.Value) {
 func GetValue(a *ssa.Value) *ssa.Value {
 	switch b := (*a).(type) {
 	case *ssa.UnOp:
+		return GetValue(&b.X)
+	case *ssa.FieldAddr:
 		return GetValue(&b.X)
 	}
 	return a
@@ -370,7 +373,8 @@ func GenPair(RecordSet []RecordField) (ret [][2]RecordField) {
 						pi.Field == pj.Field &&
 						(*pi.ins).Block() != (*pj.ins).Block() &&
 						(!pi.isAtomic || !pj.isAtomic) &&
-						(!_ReqOneInAnnoFunc_ || isInAnnoFunc(pi.ins) || isInAnnoFunc(pj.ins)) {
+						(!_ReqOneInAnnoFunc_ || isInAnnoFunc(pi.ins) || isInAnnoFunc(pj.ins)) &&
+						(!_ReqFastSame_ || FastSame(&pi.value, &pj.value)) {
 						ret = append(ret, [2]RecordField{pi, pj})
 					}
 				}
