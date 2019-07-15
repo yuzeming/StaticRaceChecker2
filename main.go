@@ -10,6 +10,7 @@ import (
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
 	"log"
+	"math/rand"
 	"os"
 	"reflect"
 	"sort"
@@ -17,7 +18,6 @@ import (
 )
 
 const _debug_print_ = true
-const _MAX_CTX_DEEP_ = 100
 const _MAX_CTX_NUM = 10
 const _IGNORE_TIMEOUT = false
 const _ReqOneInAnnoFunc_ = true
@@ -598,54 +598,57 @@ type SyncMutexItem struct {
 
 type SyncMutexList []SyncMutexItem
 
-func GenContextPath(cg *callgraph.Graph, end *callgraph.Node) (ret []ContextList) {
+// PathSearch finds an arbitrary path starting at node start and
+// ending at some node for which isEnd() returns true.  On success,
+// PathSearch returns the path as an ordered list of edges; on
+// failure, it returns nil.
+//
+func PathSearch(start *callgraph.Node, isEnd func(*callgraph.Node) bool) []*callgraph.Edge {
+	stack := make([]*callgraph.Edge, 0, 32)
 	seen := make(map[*callgraph.Node]bool)
-	var dfs func(node *callgraph.Node)
-	var dfs2 func(deep int, node *callgraph.Node)
-	dfs = func(node *callgraph.Node) {
-		if seen[node] {
-			return
+	var search func(n *callgraph.Node) []*callgraph.Edge
+	search = func(n *callgraph.Node) []*callgraph.Edge {
+		if !seen[n] {
+			seen[n] = true
+			if isEnd(n) {
+				return stack
+			}
+			out_edges := make([]*callgraph.Edge, len(n.Out))
+			copy(out_edges, n.Out)
+			rand.Shuffle(len(out_edges), func(i, j int) {
+				tmp := out_edges[i]
+				out_edges[i] = out_edges[j]
+				out_edges[j] = tmp
+			})
+			for _, e := range out_edges {
+				stack = append(stack, e) // push
+				if found := search(e.Callee); found != nil {
+					return found
+				}
+				stack = stack[:len(stack)-1] // pop
+			}
 		}
-		seen[node] = true
-		for _, p := range node.In {
-			dfs(p.Caller)
+		return nil
+	}
+	return search(start)
+}
+
+func GenContextPath(cg *callgraph.Graph, end *callgraph.Node) (ret []ContextList) {
+	for i := 1; i <= _MAX_CTX_NUM; i++ {
+		tmp := PathSearch(cg.Root, func(node *callgraph.Node) bool {
+			return node == end
+		})
+		var tmp2 ContextList
+		for _, edge := range tmp {
+			if edge.Site != nil {
+				tmp2 = append(tmp2, edge.Site)
+			}
+		}
+		ret = append(ret, tmp2)
+		if len(ret) > _MAX_CTX_NUM {
+			break
 		}
 	}
-	dfs(end)
-
-	var maxdeep = _MAX_CTX_DEEP_
-	var cl = make(ContextList, maxdeep)
-	dfs2 = func(deep int, n *callgraph.Node) {
-		if !seen[n] || deep >= maxdeep {
-			return
-		}
-		if n == end {
-			var cl2 = make(ContextList, deep-1)
-			for i := 1; i < deep; i++ {
-				cl2[i-1] = cl[i]
-			}
-			ret = append(ret, cl2)
-			if len(ret) >= _MAX_CTX_NUM {
-				maxdeep = 0
-			}
-			return
-		}
-		seen[n] = false
-		for _, p := range n.Out {
-			switch x := p.Site.(type) {
-			case *ssa.Go:
-				cl[deep] = x
-			case *ssa.Call:
-				cl[deep] = x
-			case *ssa.Defer:
-
-			}
-
-			dfs2(deep+1, p.Callee)
-		}
-		seen[n] = true
-	}
-	dfs2(0, cg.Root)
 	return ret
 }
 
