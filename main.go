@@ -66,7 +66,13 @@ func GetValue(a *ssa.Value) *ssa.Value {
 	return a
 }
 
+func SlowSame(a *ssa.Value, b *ssa.Value) bool {
+	// Use PA again
+	return false
+}
+
 func FastSame(a *ssa.Value, b *ssa.Value) bool {
+	ra, rb := a, b
 	a = GetValue(a)
 	b = GetValue(b)
 	if fa, isok := (*a).(*ssa.FreeVar); isok {
@@ -75,7 +81,7 @@ func FastSame(a *ssa.Value, b *ssa.Value) bool {
 	if fb, isok := (*b).(*ssa.FreeVar); isok {
 		b = LockupFreeVar(fb)
 	}
-	return a == b || reflect.DeepEqual(a, b)
+	return a == b || reflect.DeepEqual(a, b) || SlowSame(ra, rb)
 }
 
 var RecordSet_Field []RecordField
@@ -104,7 +110,10 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 					var addAnons func(f *ssa.Function)
 					addAnons = func(f *ssa.Function) {
 						fullfn := pkg.Pkg.Path() + "@" + f.Name()
-						if !fn_seen[fullfn] && !strings.HasPrefix(f.Name(), "init#") {
+						if f.Name() == "init" && f.Synthetic == "package initializer" {
+							return
+						}
+						if !fn_seen[fullfn] {
 							fn_seen[fullfn] = true
 							FuncsList = append(FuncsList, f)
 							if f.Blocks == nil {
@@ -196,6 +205,9 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 	if err != nil {
 		panic(err) // internal error in pointer analysis
 	}
+
+	result.CallGraph.DeleteSyntheticNodes()
+
 	if false {
 		var edges []string
 		_ = callgraph.GraphVisitEdges(result.CallGraph, func(edge *callgraph.Edge) error {
@@ -375,7 +387,7 @@ func GenPair(RecordSet []RecordField) (ret [][2]RecordField) {
 				if pj := RecordSet[j]; !pj.isWrite || i < j {
 					if reflect.DeepEqual(pi.value.Type(), pj.value.Type()) &&
 						pi.Field == pj.Field &&
-						(*pi.ins).Block() != (*pj.ins).Block() &&
+						(*pi.ins).Block().Parent() != (*pj.ins).Block().Parent() &&
 						(!pi.isAtomic || !pj.isAtomic) &&
 						(!_ReqOneInAnnoFunc_ || isInAnnoFunc(pi.ins) || isInAnnoFunc(pj.ins)) &&
 						(!_ReqFastSame_ || FastSame(&pi.value, &pj.value)) &&
@@ -598,39 +610,42 @@ type SyncMutexItem struct {
 
 type SyncMutexList []SyncMutexItem
 
-// PathSearch finds an arbitrary path starting at node start and
-// ending at some node for which isEnd() returns true.  On success,
-// PathSearch returns the path as an ordered list of edges; on
-// failure, it returns nil.
-//
-func PathSearch(start *callgraph.Node, isEnd func(*callgraph.Node) bool) []*callgraph.Edge {
-	stack := make([]*callgraph.Edge, 0, 32)
+func PathSearch(start *callgraph.Node, isEnd func(*callgraph.Node) bool) (ret []*callgraph.Edge) {
+	que := make([]*callgraph.Node, 0, 32)
 	seen := make(map[*callgraph.Node]bool)
-	var search func(n *callgraph.Node) []*callgraph.Edge
-	search = func(n *callgraph.Node) []*callgraph.Edge {
-		if !seen[n] {
-			seen[n] = true
-			if isEnd(n) {
-				return stack
+	from := make(map[*callgraph.Node]*callgraph.Edge)
+	que = append(que, start)
+	seen[start] = true
+	for i := 0; i < len(que); i++ {
+		n := que[i]
+		if isEnd(n) {
+			for j := 0; n != start; j++ {
+				ret = append(ret, from[n])
+				n = from[n].Caller
 			}
-			out_edges := make([]*callgraph.Edge, len(n.Out))
-			copy(out_edges, n.Out)
-			rand.Shuffle(len(out_edges), func(i, j int) {
-				tmp := out_edges[i]
-				out_edges[i] = out_edges[j]
-				out_edges[j] = tmp
-			})
-			for _, e := range out_edges {
-				stack = append(stack, e) // push
-				if found := search(e.Callee); found != nil {
-					return found
-				}
-				stack = stack[:len(stack)-1] // pop
+			for i, j := 0, len(ret)-1; i < j; i, j = i+1, j-1 {
+				ret[i], ret[j] = ret[j], ret[i]
+			}
+			return ret
+		}
+		out_edges := make([]*callgraph.Edge, len(n.Out))
+		copy(out_edges, n.Out)
+		rand.Shuffle(len(out_edges), func(i, j int) {
+			tmp := out_edges[i]
+			out_edges[i] = out_edges[j]
+			out_edges[j] = tmp
+		})
+		for _, e := range out_edges {
+			if !seen[e.Callee] {
+				seen[e.Callee] = true
+				from[e.Callee] = e
+				que = append(que, e.Callee)
 			}
 		}
-		return nil
+
 	}
-	return search(start)
+
+	return
 }
 
 func GenContextPath(cg *callgraph.Graph, end *callgraph.Node) (ret []ContextList) {
@@ -663,7 +678,14 @@ func hasTimeoutState(states []*ssa.SelectState) bool {
 	return false
 }
 
-func GetSyncValue(instr *ssa.Instruction) (ret SyncMutexList) {
+func CleanDefer(x SyncMutexList) (ret SyncMutexList) {
+	for i := range x {
+		x[i].deferCall = false
+	}
+	return x
+}
+
+func GetSyncValue(instr *ssa.Instruction, dir int) (ret SyncMutexList) {
 	switch ins := (*instr).(type) {
 	case *ssa.Send:
 		return SyncMutexList{SyncMutexItem{value: ins.Chan, deferCall: false, op: 1}} //1 for send
@@ -694,6 +716,15 @@ func GetSyncValue(instr *ssa.Instruction) (ret SyncMutexList) {
 			if _, ischen := ins.Call.Args[0].Type().(*types.Chan); ischen {
 				return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 3, false}} //21 for close chan
 			}
+		case "(*golang.org/x/sync/errgroup.Group).Wait":
+			fn, ok := ins.Call.Value.(*ssa.Function)
+			if dir == 1 && ok {
+				return CleanDefer(GetBefore(fn.Blocks[0].Instrs[0]))
+			}
+			if dir == -1 && ok {
+				return CleanDefer(GetAfter(fn.Blocks[0].Instrs[0]))
+			}
+			return nil
 		default:
 			return SyncMutexList{SyncMutexItem{nil, &ins.Call, 31, false}} //31 for normal call
 		}
@@ -712,6 +743,15 @@ func GetSyncValue(instr *ssa.Instruction) (ret SyncMutexList) {
 			if _, ischen := ins.Call.Args[0].Type().(*types.Chan); ischen {
 				return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 3, true}} //21 for close chan
 			}
+		case "(*golang.org/x/sync/errgroup.Group).Wait":
+			fn, ok := ins.Call.Value.(*ssa.Function)
+			if dir == 1 && ok {
+				return CleanDefer(GetBefore(fn.Blocks[0].Instrs[0]))
+			}
+			if dir == -1 && ok {
+				return CleanDefer(GetAfter(fn.Blocks[0].Instrs[0]))
+			}
+			return nil
 		}
 	case *ssa.Go:
 		return SyncMutexList{SyncMutexItem{nil, &ins.Call, 30, false}} //30 for GoCall
@@ -727,7 +767,7 @@ func GetBefore(start ssa.Instruction) (sync SyncMutexList) {
 	for bb != nil {
 		for i := len(bb.Instrs) - 1; i >= 0; i-- {
 			if match {
-				if tmp := GetSyncValue(&bb.Instrs[i]); tmp != nil {
+				if tmp := GetSyncValue(&bb.Instrs[i], -1); tmp != nil {
 					sync = append(sync, tmp...)
 				}
 			} else {
@@ -751,7 +791,7 @@ func GetAfter(start ssa.Instruction) (sync SyncMutexList) {
 		bb = que[i]
 		for i := range bb.Instrs {
 			if match {
-				if tmp := GetSyncValue(&bb.Instrs[i]); tmp != nil {
+				if tmp := GetSyncValue(&bb.Instrs[i], 1); tmp != nil {
 					sync = append(sync, tmp...)
 				}
 			} else {
@@ -832,12 +872,21 @@ func CheckReachableInstr(start, end ssa.Instruction) bool {
 	return false
 }
 
+func isCopyToHeap(call, ins ssa.Instruction) bool {
+	if ins2, ok := ins.(*ssa.Store); ok {
+		if addr2, ok2 := ins2.Addr.(*ssa.Alloc); ok2 {
+			return CheckReachableInstr(call, addr2)
+		}
+	}
+	return false
+}
+
 func FindGoCallInAfterSet(ctx1 ContextList, afterSet SyncMutexList, instr2 *ssa.Instruction) bool {
 	for _, call := range ctx1 {
 		call2, isgo := call.(*ssa.Go)
 		if isgo {
 			for _, item := range afterSet {
-				if item.gocall != nil && item.gocall == (*call2).Common() && !CheckReachableInstr(call, *instr2) {
+				if item.gocall != nil && item.gocall.Pos() == (*call2).Common().Pos() && (isCopyToHeap(call, *instr2) || !CheckReachableInstr(call, *instr2)) {
 					return true
 				}
 			}
@@ -845,7 +894,7 @@ func FindGoCallInAfterSet(ctx1 ContextList, afterSet SyncMutexList, instr2 *ssa.
 		call3, iscall := call.(*ssa.Call)
 		if iscall {
 			for _, item := range afterSet {
-				if item.gocall != nil && item.gocall == (*call3).Common() && !CheckReachableInstr(call, *instr2) {
+				if item.gocall != nil && item.gocall.Pos() == (*call3).Common().Pos() && (isCopyToHeap(call, *instr2) || !CheckReachableInstr(call, *instr2)) {
 					return true
 				}
 			}
