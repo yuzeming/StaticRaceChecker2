@@ -387,7 +387,7 @@ func GenPair(RecordSet []RecordField) (ret [][2]RecordField) {
 				if pj := RecordSet[j]; !pj.isWrite || i < j {
 					if reflect.DeepEqual(pi.value.Type(), pj.value.Type()) &&
 						pi.Field == pj.Field &&
-						(*pi.ins).Block().Parent() != (*pj.ins).Block().Parent() &&
+						(*pi.ins).Block() != (*pj.ins).Block() &&
 						(!pi.isAtomic || !pj.isAtomic) &&
 						(!_ReqOneInAnnoFunc_ || isInAnnoFunc(pi.ins) || isInAnnoFunc(pj.ins)) &&
 						(!_ReqFastSame_ || FastSame(&pi.value, &pj.value)) &&
@@ -874,7 +874,8 @@ func CheckReachableInstr(start, end ssa.Instruction) bool {
 
 func isCopyToHeap(call, ins ssa.Instruction) bool {
 	if ins2, ok := ins.(*ssa.Store); ok {
-		if addr2, ok2 := ins2.Addr.(*ssa.Alloc); ok2 {
+		addr := GetValue(&ins2.Addr)
+		if addr2, ok2 := (*addr).(*ssa.Alloc); ok2 {
 			return CheckReachableInstr(call, addr2)
 		}
 	}
