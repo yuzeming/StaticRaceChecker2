@@ -501,6 +501,13 @@ func analysisInstrs(instrs *ssa.Instruction) {
 				RecordSet_Field = append(RecordSet_Field, tmp)
 			}
 		}
+		if _, ok := elem.(*types.Map); ok && ins.Heap {
+			ref := *ins.Referrers()
+			for i := range ref {
+				tmp := RecordField{&ref[i], ins, 0, true, isWrite(ref[i], ins), false}
+				RecordSet_Map = append(RecordSet_Map, tmp)
+			}
+		}
 	case *ssa.MakeClosure:
 		freevar := ins.Fn.(*ssa.Function).FreeVars
 		for i := range ins.Bindings {
@@ -591,10 +598,27 @@ func runFunc1(fn *ssa.Function) {
 			case *ssa.Index:
 			case *ssa.IndexAddr:
 			case *ssa.Call:
-
+			case *ssa.MapUpdate:
+			case *ssa.Lookup:
 			default:
-				tmp := RecordField{&ref[i], freevar, 0, true, isWrite(ref[i], freevar), false}
-				RecordSet_Basic = append(RecordSet_Basic, tmp)
+				elem := freevar.Type().Underlying().(*types.Pointer).Elem()
+				if _, ok := elem.(*types.Basic); ok {
+					tmp := RecordField{&ref[i], freevar, 0, true, isWrite(ref[i], freevar), false}
+					RecordSet_Basic = append(RecordSet_Basic, tmp)
+				}
+				if _, ok := elem.(*types.Array); ok {
+					tmp := RecordField{&ref[i], freevar, 0, true, isWrite(ref[i], freevar), false}
+					RecordSet_Array = append(RecordSet_Array, tmp)
+				}
+				if _, ok := elem.(*types.Struct); ok {
+					tmp := RecordField{&ref[i], freevar, 0, true, isWrite(ref[i], freevar), false}
+					RecordSet_Field = append(RecordSet_Field, tmp)
+
+				}
+				if _, ok := elem.(*types.Map); ok {
+					tmp := RecordField{&ref[i], freevar, 0, true, isWrite(ref[i], freevar), false}
+					RecordSet_Map = append(RecordSet_Map, tmp)
+				}
 			}
 		}
 	}
