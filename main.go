@@ -22,6 +22,7 @@ const _MAX_CTX_NUM = 10
 const _IGNORE_TIMEOUT = false
 const _ReqOneInAnnoFunc_ = true
 const _ReqFastSame_ = true
+const _AllowStartFromAnyFunc_ = true
 
 type RecordField struct {
 	ins      *ssa.Instruction
@@ -160,6 +161,7 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 			}
 		}
 	*/
+
 	pkgset := make(map[*ssa.Package]bool)
 	fnseen := make(map[string]bool)
 	for _, pkg := range pkgs {
@@ -431,6 +433,13 @@ func GenPair(RecordSet []RecordField) (ret [][2]RecordField) {
 	return ret
 }
 
+func GetParent(fn *ssa.Function) *ssa.Function {
+	for fn.Parent() != nil {
+		fn = fn.Parent()
+	}
+	return fn
+}
+
 func CheckReachablePair(cg *callgraph.Graph, field [2]RecordField) bool {
 	//println((*field[0].ins).Parent().Name(), (*field[1].ins).Parent().Name())
 
@@ -442,8 +451,8 @@ func CheckReachablePair(cg *callgraph.Graph, field [2]RecordField) bool {
 	}
 
 	startpoint := cg.Root
-	if _, ok := field[0].value.(*ssa.Alloc); ok {
-		startpoint = cg.Nodes[(*field[0].ins).Parent()]
+	if tmp := GetParent(node1.Func); _AllowStartFromAnyFunc_ && tmp == GetParent(node2.Func) {
+		startpoint = cg.Nodes[tmp]
 	}
 
 	seen := make(map[*callgraph.Node]int)
@@ -664,7 +673,7 @@ type SyncMutexItem struct {
 
 type SyncMutexList []SyncMutexItem
 
-func PathSearch(start *callgraph.Node, isEnd func(*callgraph.Node) bool) (ret []*callgraph.Edge) {
+func PathSearch(start, end *callgraph.Node) (ret []*callgraph.Edge) {
 	que := make([]*callgraph.Node, 0, 32)
 	seen := make(map[*callgraph.Node]bool)
 	from := make(map[*callgraph.Node]*callgraph.Edge)
@@ -672,7 +681,7 @@ func PathSearch(start *callgraph.Node, isEnd func(*callgraph.Node) bool) (ret []
 	seen[start] = true
 	for i := 0; i < len(que); i++ {
 		n := que[i]
-		if isEnd(n) {
+		if n == end {
 			for j := 0; n != start; j++ {
 				ret = append(ret, from[n])
 				n = from[n].Caller
@@ -702,11 +711,9 @@ func PathSearch(start *callgraph.Node, isEnd func(*callgraph.Node) bool) (ret []
 	return
 }
 
-func GenContextPath(cg *callgraph.Graph, end *callgraph.Node) (ret []ContextList) {
+func GenContextPath(start, end *callgraph.Node) (ret []ContextList) {
 	for i := 1; i <= _MAX_CTX_NUM; i++ {
-		tmp := PathSearch(cg.Root, func(node *callgraph.Node) bool {
-			return node == end
-		})
+		tmp := PathSearch(start, end)
 		var tmp2 ContextList
 		for _, edge := range tmp {
 			if edge.Site != nil {
@@ -1019,12 +1026,17 @@ func CheckHappendBefore(prog *ssa.Program, cg *callgraph.Graph, field [2]RecordF
 		return
 	}
 
-	contextlist1 := GenContextPath(cg, node1)
+	startpoint := cg.Root
+	if tmp := GetParent(node1.Func); _AllowStartFromAnyFunc_ && tmp == GetParent(node2.Func) {
+		startpoint = cg.Nodes[tmp]
+	}
+
+	contextlist1 := GenContextPath(startpoint, node1)
 	for i := range contextlist1 {
 		contextlist1[i] = append(contextlist1[i], *field[0].ins)
 	}
 
-	contextlist2 := GenContextPath(cg, node2)
+	contextlist2 := GenContextPath(startpoint, node2)
 	for i := range contextlist2 {
 		contextlist2[i] = append(contextlist2[i], *field[1].ins)
 	}
@@ -1079,7 +1091,7 @@ func CheckHappendBefore(prog *ssa.Program, cg *callgraph.Graph, field [2]RecordF
 }
 
 func main() {
-	cfg := packages.Config{Mode: packages.LoadAllSyntax, Tests: false}
+	cfg := packages.Config{Mode: packages.LoadAllSyntax, Tests: true}
 	initial, err := packages.Load(&cfg, os.Args[1])
 	if err != nil {
 		log.Fatal(err)
