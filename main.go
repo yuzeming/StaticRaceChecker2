@@ -95,43 +95,100 @@ var PairSet_Basic [][2]RecordField
 var PairSet_Map [][2]RecordField
 
 func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
-	println("Pass run")
 
-	var FuncsList []*ssa.Function
-
-	fn_seen := make(map[string]bool)
-	for ipkg := len(pkgs) - 1; ipkg > 0; ipkg-- {
-		pkg := pkgs[ipkg]
-
+	var mainpkgs []*ssa.Package
+	for _, pkg := range pkgs {
 		if pkg != nil {
-			for _, v := range pkg.Members {
-				f, ok := v.(*ssa.Function)
-				if ok && f.Name() != "init" {
-					var addAnons func(f *ssa.Function)
-					addAnons = func(f *ssa.Function) {
-						fullfn := pkg.Pkg.Path() + "@" + f.Name()
-						if f.Name() == "init" && f.Synthetic == "package initializer" {
-							return
-						}
-						if !fn_seen[fullfn] {
-							fn_seen[fullfn] = true
-							FuncsList = append(FuncsList, f)
-							if f.Blocks == nil {
-								println("[ZZZ] empty blocks", f.Name())
-							}
-							for _, anon := range f.AnonFuncs {
-								addAnons(anon)
-							}
-						}
-					}
-					addAnons(f)
-				}
+			if pkg.Func("main") != nil {
+				mainpkgs = append(mainpkgs, pkg)
+			}
+			if testpkg := prog.CreateTestMainPackage(pkg); testpkg != nil {
+				mainpkgs = append(mainpkgs, testpkg)
 			}
 		}
 	}
 
-	for _, fn := range FuncsList {
-		runFunc1(fn)
+	config := &pointer.Config{
+		Mains:          mainpkgs,
+		BuildCallGraph: true,
+	}
+
+	result, err := pointer.Analyze(config)
+
+	if err != nil {
+		panic(err) // internal error in pointer analysis
+	}
+
+	println("Pass run")
+
+	FuncsList := ssautil.AllFunctions(prog)
+
+	/*
+		var FuncsList []*ssa.Function
+
+		fn_seen := make(map[string]bool)
+		for ipkg := len(pkgs) - 1; ipkg >= 0; ipkg-- {
+			pkg := pkgs[ipkg]
+
+			if pkg != nil {
+				for _, v := range pkg.Members {
+					if f, ok := v.(*ssa.Function);ok && f.Name() != "init" {
+						var addAnons func(f *ssa.Function)
+						addAnons = func(f *ssa.Function) {
+							fullfn := pkg.Pkg.Path() + "@" + f.Name()
+							if f.Name() == "init" && f.Synthetic == "package initializer" {
+								return
+							}
+							if !fn_seen[fullfn] {
+								fn_seen[fullfn] = true
+								FuncsList = append(FuncsList, f)
+								if f.Blocks == nil {
+									println("[ZZZ] empty blocks", f.Name())
+								}
+								for _, anon := range f.AnonFuncs {
+									addAnons(anon)
+								}
+							}
+						}
+						addAnons(f)
+					}
+					if typ, ok := v.(*ssa.Type); ok {
+						println(typ.Type())
+					}
+				}
+
+			}
+		}
+	*/
+	pkgset := make(map[*ssa.Package]bool)
+	fnseen := make(map[string]bool)
+	for _, pkg := range pkgs {
+		pkgset[pkg] = true
+	}
+	var FuncsList2 []*ssa.Function
+	for k := range FuncsList {
+		FuncsList2 = append(FuncsList2, k)
+	}
+
+	xlen := len(FuncsList)
+	for i := xlen - 1; i >= 0; i-- {
+		fn := FuncsList2[i]
+		if fn.Blocks != nil && fn.Pkg != nil && pkgset[fn.Pkg] {
+			fnname := fn.Pkg.Pkg.Path() + "|" + fn.String()
+			if !fnseen[fnname] {
+				fnseen[fnname] = true
+				println(fnname)
+			}
+		}
+	}
+
+	for fn := range result.CallGraph.Nodes {
+		if fn.Blocks != nil && fn.Pkg != nil {
+			fnname := fn.Pkg.Pkg.Path() + "|" + fn.String()
+			if fnseen[fnname] {
+				runFunc1(fn)
+			}
+		}
 	}
 
 	if _debug_print_ {
@@ -183,31 +240,6 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 		}
 	}
 
-	var mainpkgs []*ssa.Package
-	for _, pkg := range pkgs {
-		if pkg != nil {
-			if pkg.Func("main") != nil {
-				mainpkgs = append(mainpkgs, pkg)
-			}
-			if testpkg := prog.CreateTestMainPackage(pkg); testpkg != nil {
-				mainpkgs = append(mainpkgs, testpkg)
-			}
-		}
-	}
-
-	config := &pointer.Config{
-		Mains:          mainpkgs,
-		BuildCallGraph: true,
-	}
-
-	result, err := pointer.Analyze(config)
-
-	if err != nil {
-		panic(err) // internal error in pointer analysis
-	}
-
-	result.CallGraph.DeleteSyntheticNodes()
-
 	if false {
 		var edges []string
 		_ = callgraph.GraphVisitEdges(result.CallGraph, func(edge *callgraph.Edge) error {
@@ -222,8 +254,6 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 			fmt.Println(edge)
 		}
 	}
-
-	fmt.Println()
 
 	Reachable_PairSet_Field := PairSet_Field[:0]
 	for _, r := range PairSet_Field {
@@ -1049,7 +1079,7 @@ func CheckHappendBefore(prog *ssa.Program, cg *callgraph.Graph, field [2]RecordF
 }
 
 func main() {
-	cfg := packages.Config{Mode: packages.LoadAllSyntax, Tests: true}
+	cfg := packages.Config{Mode: packages.LoadAllSyntax, Tests: false}
 	initial, err := packages.Load(&cfg, os.Args[1])
 	if err != nil {
 		log.Fatal(err)
