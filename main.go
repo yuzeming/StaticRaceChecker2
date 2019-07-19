@@ -18,10 +18,10 @@ import (
 )
 
 const _debug_print_ = true
-const _MAX_CTX_NUM = 3
+const _MAX_CTX_NUM = 1
 const _IGNORE_TIMEOUT = false
 const _ReqOneInAnnoFunc_ = true
-const _ReqFastSame_ = false
+const _ReqFastSame_ = true
 const _AllowStartFromAnyFunc_ = true
 const _UseTestCase_ = true
 
@@ -29,7 +29,6 @@ type RecordField struct {
 	ins      *ssa.Instruction
 	value    ssa.Value
 	Field    int
-	isAddr   bool
 	isWrite  bool
 	isAtomic bool
 }
@@ -110,6 +109,11 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 		}
 	}
 
+	if len(mainpkgs) == 0 {
+		println("No Main Package Found")
+		return
+	}
+
 	config := &pointer.Config{
 		Mains:          mainpkgs,
 		BuildCallGraph: true,
@@ -118,10 +122,8 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 	result, err := pointer.Analyze(config)
 
 	if err != nil {
-		panic(err) // internal error in pointer analysis
+		panic(err)
 	}
-
-	println("Pass run")
 
 	FuncsList := ssautil.AllFunctions(prog)
 
@@ -131,7 +133,7 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 	}
 
 	for fn := range FuncsList {
-		if fn.Blocks != nil && fn.Pkg != nil && pkgset[fn.Pkg] {
+		if fn.Blocks != nil && fn.Pkg != nil && pkgset[fn.Pkg] && fn.Name() != "init" {
 			runFunc1(fn)
 		}
 	}
@@ -200,10 +202,10 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 		}
 	}
 
-	Reachable_PairSet_Field := PairSet_Field[:0]
+	ReachablePairSetField := PairSet_Field[:0]
 	for _, r := range PairSet_Field {
 		if CheckReachablePair(result.CallGraph, r) {
-			Reachable_PairSet_Field = append(Reachable_PairSet_Field, r)
+			ReachablePairSetField = append(ReachablePairSetField, r)
 		}
 	}
 
@@ -230,7 +232,7 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 
 	if _debug_print_ {
 		println("Reachable Field Pair")
-		for i, r := range Reachable_PairSet_Field {
+		for i, r := range ReachablePairSetField {
 			println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
 		}
 
@@ -250,99 +252,18 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 		}
 	}
 
-	config2 := &pointer.Config{
-		Mains: mainpkgs,
-	}
-
-	for _, r := range Reachable_PairSet_Field {
-		if r[0].isAddr && r[1].isAddr {
-			config2.AddQuery(r[0].value)
-			config2.AddQuery(r[1].value)
-		}
+	for _, r := range ReachablePairSetField {
+		CheckHappendBefore(prog, result.CallGraph, r)
 	}
 
 	for _, r := range ReachablePairSetArray {
-		if r[0].isAddr && r[1].isAddr {
-			config2.AddQuery(r[0].value)
-			config2.AddQuery(r[1].value)
-		}
+		CheckHappendBefore(prog, result.CallGraph, r)
 	}
 	for _, r := range ReachablePairsetBasic {
-		if r[0].isAddr && r[1].isAddr {
-			config2.AddQuery(r[0].value)
-			config2.AddQuery(r[1].value)
-		}
+		CheckHappendBefore(prog, result.CallGraph, r)
 	}
 
 	for _, r := range ReachablePairsetMap {
-		if r[0].isAddr && r[1].isAddr {
-			config2.AddQuery(r[0].value)
-			config2.AddQuery(r[1].value)
-		}
-	}
-
-	result2, err2 := pointer.Analyze(config2)
-
-	if err2 != nil {
-		panic(err) // internal error in pointer analysis
-	}
-
-	println("Alising Field Pair")
-	AlisingPairsetField := Reachable_PairSet_Field[:0]
-	for i, r := range Reachable_PairSet_Field {
-		if r[0].isAddr && r[1].isAddr && result2.Queries[r[0].value].PointsTo().Intersects(result2.Queries[r[1].value].PointsTo()) {
-			println(i, toString(prog, r[0].ins), "\n -", toString(prog, r[1].ins))
-			AlisingPairsetField = append(AlisingPairsetField, r)
-		} else {
-			println("Remove Pair", i)
-		}
-	}
-
-	println("Alising Array Pair")
-	AlisingPairsetArray := ReachablePairSetArray[:0]
-	for i, r := range ReachablePairSetArray {
-		if r[0].isAddr && r[1].isAddr && result2.Queries[r[0].value].PointsTo().Intersects(result2.Queries[r[1].value].PointsTo()) {
-			println(i, toString(prog, r[0].ins), "\n - ", toString(prog, r[1].ins))
-			AlisingPairsetArray = append(AlisingPairsetArray, r)
-		} else {
-			println("Remove Pair", i)
-		}
-	}
-
-	println("Alising Basic Pair")
-	AlisingPairsetBasic := ReachablePairsetBasic[:0]
-	for i, r := range ReachablePairsetBasic {
-		if r[0].isAddr && r[1].isAddr && result2.Queries[r[0].value].PointsTo().Intersects(result2.Queries[r[1].value].PointsTo()) {
-			println(i, toString(prog, r[0].ins), "\n - ", toString(prog, r[1].ins))
-			AlisingPairsetBasic = append(AlisingPairsetBasic, r)
-		} else {
-			println("Remove Pair", i)
-		}
-	}
-
-	println("Alising Map Pair")
-	AlisingPairsetMap := ReachablePairsetMap[:0]
-	for i, r := range ReachablePairsetMap {
-		if r[0].isAddr && r[1].isAddr && result2.Queries[r[0].value].PointsTo().Intersects(result2.Queries[r[1].value].PointsTo()) {
-			println(i, toString(prog, r[0].ins), "\n - ", toString(prog, r[1].ins))
-			AlisingPairsetMap = append(AlisingPairsetMap, r)
-		} else {
-			println("Remove Pair", i)
-		}
-	}
-
-	for _, r := range AlisingPairsetField {
-		CheckHappendBefore(prog, result.CallGraph, r)
-	}
-
-	for _, r := range AlisingPairsetArray {
-		CheckHappendBefore(prog, result.CallGraph, r)
-	}
-	for _, r := range AlisingPairsetBasic {
-		CheckHappendBefore(prog, result.CallGraph, r)
-	}
-
-	for _, r := range AlisingPairsetMap {
 		CheckHappendBefore(prog, result.CallGraph, r)
 	}
 }
@@ -390,7 +311,7 @@ func CheckReachablePair(cg *callgraph.Graph, field [2]RecordField) bool {
 	node2 := cg.Nodes[(*field[1].ins).Parent()]
 
 	if node1 == nil || node2 == nil {
-		println("nil x2 exit")
+		//println("nil x2 exit")
 		return false
 	}
 
@@ -437,28 +358,28 @@ func toString(pass *ssa.Program, op *ssa.Instruction) string {
 
 func analysisInstrs(instrs *ssa.Instruction) {
 	switch ins := (*instrs).(type) {
-	case *ssa.Field:
-		ref := *ins.Referrers()
-		for i := range ref {
-			tmp := RecordField{&ref[i], ins.X, ins.Field, false, isWrite(ref[i], ins), false}
-			RecordSet_Field = append(RecordSet_Field, tmp)
-		}
+	//case *ssa.Field:
+	//	ref := *ins.Referrers()
+	//	for i := range ref {
+	//		tmp := RecordField{&ref[i], ins.X, ins.Field, false, isWrite(ref[i], ins), false}
+	//		RecordSet_Field = append(RecordSet_Field, tmp)
+	//	}
 	case *ssa.FieldAddr:
 		ref := *ins.Referrers()
 		for i := range ref {
-			tmp := RecordField{&ref[i], ins.X, ins.Field, true, isWrite(ref[i], ins), false}
+			tmp := RecordField{&ref[i], ins.X, ins.Field, isWrite(ref[i], ins), false}
 			RecordSet_Field = append(RecordSet_Field, tmp)
 		}
-	case *ssa.Index:
-		ref := *ins.Referrers()
-		for i := range ref {
-			tmp := RecordField{&ref[i], ins.X, 0, false, isWrite(ref[i], ins), false}
-			RecordSet_Array = append(RecordSet_Array, tmp)
-		}
+	//case *ssa.Index:
+	//	ref := *ins.Referrers()
+	//	for i := range ref {
+	//		tmp := RecordField{&ref[i], ins.X, 0, false, isWrite(ref[i], ins), false}
+	//		RecordSet_Array = append(RecordSet_Array, tmp)
+	//	}
 	case *ssa.IndexAddr:
 		ref := *ins.Referrers()
 		for i := range ref {
-			tmp := RecordField{&ref[i], ins.X, 0, true, isWrite(ref[i], ins), false}
+			tmp := RecordField{&ref[i], ins.X, 0, isWrite(ref[i], ins), false}
 			RecordSet_Array = append(RecordSet_Array, tmp)
 		}
 	case *ssa.Alloc:
@@ -466,28 +387,28 @@ func analysisInstrs(instrs *ssa.Instruction) {
 		if _, ok := elem.(*types.Basic); ok && ins.Heap {
 			ref := *ins.Referrers()
 			for i := range ref {
-				tmp := RecordField{&ref[i], ins, 0, true, isWrite(ref[i], ins), false}
+				tmp := RecordField{&ref[i], ins, 0, isWrite(ref[i], ins), false}
 				RecordSet_Basic = append(RecordSet_Basic, tmp)
 			}
 		}
 		if _, ok := elem.(*types.Array); ok && ins.Heap {
 			ref := *ins.Referrers()
 			for i := range ref {
-				tmp := RecordField{&ref[i], ins, 0, true, isWrite(ref[i], ins), false}
+				tmp := RecordField{&ref[i], ins, 0, isWrite(ref[i], ins), false}
 				RecordSet_Array = append(RecordSet_Array, tmp)
 			}
 		}
 		if _, ok := elem.(*types.Struct); ok && ins.Heap {
 			ref := *ins.Referrers()
 			for i := range ref {
-				tmp := RecordField{&ref[i], ins, 0, true, isWrite(ref[i], ins), false}
+				tmp := RecordField{&ref[i], ins, 0, isWrite(ref[i], ins), false}
 				RecordSet_Field = append(RecordSet_Field, tmp)
 			}
 		}
 		if _, ok := elem.(*types.Map); ok && ins.Heap {
 			ref := *ins.Referrers()
 			for i := range ref {
-				tmp := RecordField{&ref[i], ins, 0, true, isWrite(ref[i], ins), false}
+				tmp := RecordField{&ref[i], ins, 0, isWrite(ref[i], ins), false}
 				RecordSet_Map = append(RecordSet_Map, tmp)
 			}
 		}
@@ -498,7 +419,6 @@ func analysisInstrs(instrs *ssa.Instruction) {
 		}
 	case *ssa.Call:
 		fn := ins.Call.Value.String()
-		//println("aaa",fn)
 		if strings.HasPrefix(fn, "sync/atomic.") {
 			fn2 := fn[12:]
 			switch fn2 {
@@ -507,50 +427,50 @@ func analysisInstrs(instrs *ssa.Instruction) {
 				fallthrough
 			case "CompareAndSwapInt32", "CompareAndSwapInt64", "CompareAndSwapPointer", "CompareAndSwapUint32", "CompareAndSwapUint64", "CompareAndSwapUintptr":
 				//func CompareAndSwapInt32(addr *int32, old, new int32) (swapped bool)
-				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, true, true}
+				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, true}
 				RecordSet_Basic = append(RecordSet_Basic, tmp)
-				tmp2 := RecordField{instrs, ins.Call.Args[1], 0, true, false, true}
+				tmp2 := RecordField{instrs, ins.Call.Args[1], 0, false, true}
 				RecordSet_Basic = append(RecordSet_Basic, tmp2)
 			case "LoadInt32", "LoadInt64", "LoadPointer", "LoadUint32", "LoadUint64", "LoadUintptr":
-				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, false, true}
+				tmp := RecordField{instrs, ins.Call.Args[0], 0, false, true}
 				RecordSet_Basic = append(RecordSet_Basic, tmp)
+				tmp2 := RecordField{instrs, ins.Call.Args[1], 0, true, false}
+				RecordSet_Basic = append(RecordSet_Basic, tmp2)
 			case "StoreInt32", "StoreInt64", "StorePointer", "StoreUint32", "StoreUint64", "StoreUintptr":
-				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, true, true}
+				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, true}
 				RecordSet_Basic = append(RecordSet_Basic, tmp)
+				tmp2 := RecordField{instrs, ins.Call.Args[1], 0, false, false}
+				RecordSet_Basic = append(RecordSet_Basic, tmp2)
 			case "SwapPointer", "SwapUint32", "SwapUint64", "SwapUintptr":
-				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, true, true}
+				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, true}
 				RecordSet_Basic = append(RecordSet_Basic, tmp)
-				tmp2 := RecordField{instrs, ins.Call.Args[1], 0, true, true, true}
+				tmp2 := RecordField{instrs, ins.Call.Args[1], 0, true, true}
 				RecordSet_Basic = append(RecordSet_Basic, tmp2)
 			}
 		} else {
 			switch fn {
 			case "builtin delete": // map delete
-				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, true, false}
+				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, false}
 				RecordSet_Map = append(RecordSet_Map, tmp)
 			case "builtin append":
-				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, true, false}
+				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, false}
 				RecordSet_Array = append(RecordSet_Array, tmp)
-				//var2 :=ins.Call.Args[1]
-				//switch var2.(type) {
-				//case *ssa.
-				//}
-				tmp2 := RecordField{instrs, ins.Call.Args[1], 0, true, false, false}
+				tmp2 := RecordField{instrs, ins.Call.Args[1], 0, false, false}
 				RecordSet_Array = append(RecordSet_Array, tmp2)
 			case "(*os.File).Write", "(*os.File).Read":
 				// TODO Add dst read write record
 				fallthrough
 			case "(*os.File).Close":
-				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, true, false}
+				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, false}
 				RecordSet_Basic = append(RecordSet_Basic, tmp)
 			}
 		}
 
 	case *ssa.MapUpdate:
-		tmp := RecordField{instrs, ins.Map, 0, true, true, false}
+		tmp := RecordField{instrs, ins.Map, 0, true, false}
 		RecordSet_Map = append(RecordSet_Map, tmp)
 	case *ssa.Lookup:
-		tmp := RecordField{instrs, ins.X, 0, true, false, false}
+		tmp := RecordField{instrs, ins.X, 0, false, false}
 		RecordSet_Map = append(RecordSet_Map, tmp)
 	default:
 	}
@@ -586,20 +506,19 @@ func runFunc1(fn *ssa.Function) {
 			default:
 				elem := freevar.Type().Underlying().(*types.Pointer).Elem()
 				if _, ok := elem.(*types.Basic); ok {
-					tmp := RecordField{&ref[i], freevar, 0, true, isWrite(ref[i], freevar), false}
+					tmp := RecordField{&ref[i], freevar, 0, isWrite(ref[i], freevar), false}
 					RecordSet_Basic = append(RecordSet_Basic, tmp)
 				}
 				if _, ok := elem.(*types.Array); ok {
-					tmp := RecordField{&ref[i], freevar, 0, true, isWrite(ref[i], freevar), false}
+					tmp := RecordField{&ref[i], freevar, 0, isWrite(ref[i], freevar), false}
 					RecordSet_Array = append(RecordSet_Array, tmp)
 				}
 				if _, ok := elem.(*types.Struct); ok {
-					tmp := RecordField{&ref[i], freevar, 0, true, isWrite(ref[i], freevar), false}
+					tmp := RecordField{&ref[i], freevar, 0, isWrite(ref[i], freevar), false}
 					RecordSet_Field = append(RecordSet_Field, tmp)
-
 				}
 				if _, ok := elem.(*types.Map); ok {
-					tmp := RecordField{&ref[i], freevar, 0, true, isWrite(ref[i], freevar), false}
+					tmp := RecordField{&ref[i], freevar, 0, isWrite(ref[i], freevar), false}
 					RecordSet_Map = append(RecordSet_Map, tmp)
 				}
 			}
@@ -643,7 +562,7 @@ func PathSearch(start, end *callgraph.Node) (ret []*callgraph.Edge) {
 			out_edges[j] = tmp
 		})
 		for _, e := range out_edges {
-			if !seen[e.Callee] {
+			if !seen[e.Callee] && e.Callee.Func.String() != "(*testing.T).Run" { // don't go into (*testing.T).Run, it's not parallel
 				seen[e.Callee] = true
 				from[e.Callee] = e
 				que = append(que, e.Callee)
@@ -651,7 +570,6 @@ func PathSearch(start, end *callgraph.Node) (ret []*callgraph.Edge) {
 		}
 
 	}
-
 	return
 }
 
@@ -1000,6 +918,19 @@ func CheckHappendBefore(prog *ssa.Program, cg *callgraph.Graph, field [2]RecordF
 		for j, set2 := range BASet2 {
 			ctx2 := contextlist2[j]
 
+			if len(ctx1) == len(ctx2) {
+				isSame := true
+				for i := len(ctx1) - 2; i >= 0; i-- {
+					if ctx1[i] != ctx2[i] {
+						isSame = false
+						break
+					}
+				}
+				if isSame {
+					continue
+				}
+			}
+
 			if !hasGoCall(ctx1) && !hasGoCall(ctx2) {
 				continue
 			}
@@ -1035,6 +966,7 @@ func CheckHappendBefore(prog *ssa.Program, cg *callgraph.Graph, field [2]RecordF
 }
 
 func main() {
+	println("Run for [ZZZ]:", os.Args[1])
 	cfg := packages.Config{Mode: packages.LoadAllSyntax, Tests: _UseTestCase_}
 	initial, err := packages.Load(&cfg, os.Args[1])
 	if err != nil {
