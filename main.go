@@ -18,11 +18,12 @@ import (
 )
 
 const _debug_print_ = true
-const _MAX_CTX_NUM = 10
+const _MAX_CTX_NUM = 3
 const _IGNORE_TIMEOUT = false
 const _ReqOneInAnnoFunc_ = true
-const _ReqFastSame_ = true
+const _ReqFastSame_ = false
 const _AllowStartFromAnyFunc_ = true
+const _UseTestCase_ = true
 
 type RecordField struct {
 	ins      *ssa.Instruction
@@ -124,72 +125,14 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 
 	FuncsList := ssautil.AllFunctions(prog)
 
-	/*
-		var FuncsList []*ssa.Function
-
-		fn_seen := make(map[string]bool)
-		for ipkg := len(pkgs) - 1; ipkg >= 0; ipkg-- {
-			pkg := pkgs[ipkg]
-
-			if pkg != nil {
-				for _, v := range pkg.Members {
-					if f, ok := v.(*ssa.Function);ok && f.Name() != "init" {
-						var addAnons func(f *ssa.Function)
-						addAnons = func(f *ssa.Function) {
-							fullfn := pkg.Pkg.Path() + "@" + f.Name()
-							if f.Name() == "init" && f.Synthetic == "package initializer" {
-								return
-							}
-							if !fn_seen[fullfn] {
-								fn_seen[fullfn] = true
-								FuncsList = append(FuncsList, f)
-								if f.Blocks == nil {
-									println("[ZZZ] empty blocks", f.Name())
-								}
-								for _, anon := range f.AnonFuncs {
-									addAnons(anon)
-								}
-							}
-						}
-						addAnons(f)
-					}
-					if typ, ok := v.(*ssa.Type); ok {
-						println(typ.Type())
-					}
-				}
-
-			}
-		}
-	*/
-
 	pkgset := make(map[*ssa.Package]bool)
-	fnseen := make(map[string]bool)
 	for _, pkg := range pkgs {
 		pkgset[pkg] = true
 	}
-	var FuncsList2 []*ssa.Function
-	for k := range FuncsList {
-		FuncsList2 = append(FuncsList2, k)
-	}
 
-	xlen := len(FuncsList)
-	for i := xlen - 1; i >= 0; i-- {
-		fn := FuncsList2[i]
+	for fn := range FuncsList {
 		if fn.Blocks != nil && fn.Pkg != nil && pkgset[fn.Pkg] {
-			fnname := fn.Pkg.Pkg.Path() + "|" + fn.String()
-			if !fnseen[fnname] {
-				fnseen[fnname] = true
-				println(fnname)
-			}
-		}
-	}
-
-	for fn := range result.CallGraph.Nodes {
-		if fn.Blocks != nil && fn.Pkg != nil {
-			fnname := fn.Pkg.Pkg.Path() + "|" + fn.String()
-			if fnseen[fnname] {
-				runFunc1(fn)
-			}
+			runFunc1(fn)
 		}
 	}
 
@@ -447,6 +390,7 @@ func CheckReachablePair(cg *callgraph.Graph, field [2]RecordField) bool {
 	node2 := cg.Nodes[(*field[1].ins).Parent()]
 
 	if node1 == nil || node2 == nil {
+		println("nil x2 exit")
 		return false
 	}
 
@@ -624,7 +568,7 @@ func visitBasicBlock(fnname string, bb *ssa.BasicBlock) {
 func runFunc1(fn *ssa.Function) {
 	fnname := fn.String()
 	if _debug_print_ {
-		println("runFunc1", fnname)
+		println("runFunc1", fnname, fn)
 	}
 	visitBasicBlock(fnname, fn.Blocks[0])
 
@@ -1091,14 +1035,30 @@ func CheckHappendBefore(prog *ssa.Program, cg *callgraph.Graph, field [2]RecordF
 }
 
 func main() {
-	cfg := packages.Config{Mode: packages.LoadAllSyntax, Tests: true}
+	cfg := packages.Config{Mode: packages.LoadAllSyntax, Tests: _UseTestCase_}
 	initial, err := packages.Load(&cfg, os.Args[1])
 	if err != nil {
 		log.Fatal(err)
 	}
-
 	if packages.PrintErrors(initial) > 0 {
 		return
+	}
+
+	if _UseTestCase_ {
+
+		// For example, when using the go command, loading "fmt" with Tests=true
+		// returns four packages, with IDs "fmt" (the standard package),
+		// "fmt [fmt.test]" (the package as compiled for the test),
+		// "fmt_test" (the test functions from source files in package fmt_test),
+		// and "fmt.test" (the test binary).
+
+		initial2 := initial[:0]
+		for i := range initial {
+			if strings.HasSuffix(initial[i].ID, "]") {
+				initial2 = append(initial2, initial[i])
+			}
+		}
+		initial = initial2
 	}
 
 	// Create SSA packages for well-typed packages and their dependencies.
