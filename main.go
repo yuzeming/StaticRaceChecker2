@@ -67,13 +67,7 @@ func GetValue(a *ssa.Value) *ssa.Value {
 	return a
 }
 
-func SlowSame(a *ssa.Value, b *ssa.Value) bool {
-	// Use PA again
-	return false
-}
-
 func FastSame(a *ssa.Value, b *ssa.Value) bool {
-	ra, rb := a, b
 	a = GetValue(a)
 	b = GetValue(b)
 	if fa, isok := (*a).(*ssa.FreeVar); isok {
@@ -82,7 +76,7 @@ func FastSame(a *ssa.Value, b *ssa.Value) bool {
 	if fb, isok := (*b).(*ssa.FreeVar); isok {
 		b = LockupFreeVar(fb)
 	}
-	return a == b || reflect.DeepEqual(a, b) || SlowSame(ra, rb)
+	return a == b || reflect.DeepEqual(a, b)
 }
 
 var RecordSet_Field []RecordField
@@ -906,6 +900,16 @@ func hasGoCall(ctx ContextList) bool {
 	return false
 }
 
+func hasGoInLoop(ctx ContextList) bool {
+	x := len(ctx)
+	for i := 0; i < x-1; i++ {
+		if _, ok := ctx[i].(*ssa.Go); ok && CheckReachableInstr(ctx[i], ctx[i]) {
+			return true
+		}
+	}
+	return false
+}
+
 func CheckHappendBefore(prog *ssa.Program, cg *callgraph.Graph, field [2]RecordField) {
 	node1 := cg.Nodes[(*field[0].ins).Parent()]
 	node2 := cg.Nodes[(*field[1].ins).Parent()]
@@ -933,7 +937,7 @@ func CheckHappendBefore(prog *ssa.Program, cg *callgraph.Graph, field [2]RecordF
 				break
 			}
 		}
-		if isSame {
+		if isSame && !hasGoInLoop(ctx1) {
 			return
 		}
 	}
