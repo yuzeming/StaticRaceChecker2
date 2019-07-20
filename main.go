@@ -5,12 +5,12 @@ import (
 	"go/token"
 	"go/types"
 	"golang.org/x/tools/go/callgraph"
+	"golang.org/x/tools/go/callgraph/cha"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/pointer"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
 	"log"
-	"math/rand"
 	"os"
 	"reflect"
 	"sort"
@@ -95,6 +95,14 @@ var PairSet_Array [][2]RecordField
 var PairSet_Basic [][2]RecordField
 var PairSet_Map [][2]RecordField
 
+func GetAnnoFunctionList(fn *ssa.Function) (anfn []*ssa.Function) {
+	anfn = append(anfn, fn)
+	for _, x := range fn.AnonFuncs {
+		anfn = append(anfn, GetAnnoFunctionList(x)...)
+	}
+	return anfn
+}
+
 func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 
 	var mainpkgs []*ssa.Package
@@ -109,20 +117,23 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 		}
 	}
 
+	var callGraph *callgraph.Graph
+
+	cg2 := cha.CallGraph(prog)
+
 	if len(mainpkgs) == 0 {
 		println("No Main Package Found")
-		return
-	}
-
-	config := &pointer.Config{
-		Mains:          mainpkgs,
-		BuildCallGraph: true,
-	}
-
-	result, err := pointer.Analyze(config)
-
-	if err != nil {
-		panic(err)
+		callGraph = cg2
+	} else {
+		config := &pointer.Config{
+			Mains:          mainpkgs,
+			BuildCallGraph: true,
+		}
+		result, err := pointer.Analyze(config)
+		if err != nil {
+			panic(err)
+		}
+		callGraph = result.CallGraph
 	}
 
 	FuncsList := ssautil.AllFunctions(prog)
@@ -135,6 +146,35 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 	for fn := range FuncsList {
 		if fn.Blocks != nil && fn.Pkg != nil && pkgset[fn.Pkg] && fn.Name() != "init" {
 			runFunc1(fn)
+		}
+
+		if pkgset[fn.Pkg] && callGraph.Nodes[fn] == nil && fn.Parent() == nil {
+			println("dead code", fn.String())
+			//Add fake cg node to improve cover
+			annoFnSet := make(map[*ssa.Function]bool)
+			for _, fn := range GetAnnoFunctionList(fn) {
+				annoFnSet[fn] = true
+			}
+
+			//copy nodes
+			for k := range annoFnSet {
+				if callGraph.Nodes[k] == nil {
+					callGraph.CreateNode(k)
+				}
+			}
+
+			//copy edges
+			for k := range annoFnSet {
+				node := cg2.Nodes[k]
+				for _, edge := range node.Out {
+					if calleefn := edge.Callee.Func; annoFnSet[calleefn] {
+						callgraph.AddEdge(callGraph.Nodes[k], edge.Site, callGraph.Nodes[calleefn])
+					}
+				}
+			}
+
+			//Add A fake edge from node to fn
+			callgraph.AddEdge(callGraph.Root, nil, callGraph.Nodes[fn])
 		}
 	}
 
@@ -189,7 +229,7 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 
 	if false {
 		var edges []string
-		_ = callgraph.GraphVisitEdges(result.CallGraph, func(edge *callgraph.Edge) error {
+		_ = callgraph.GraphVisitEdges(callGraph, func(edge *callgraph.Edge) error {
 			caller := edge.Caller.Func
 			edges = append(edges, fmt.Sprint(caller, " --> ", edge.Callee.Func))
 			return nil
@@ -204,28 +244,28 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 
 	ReachablePairSetField := PairSet_Field[:0]
 	for _, r := range PairSet_Field {
-		if CheckReachablePair(result.CallGraph, r) {
+		if CheckReachablePair(callGraph, r) {
 			ReachablePairSetField = append(ReachablePairSetField, r)
 		}
 	}
 
 	ReachablePairSetArray := PairSet_Array[:0]
 	for _, r := range PairSet_Array {
-		if CheckReachablePair(result.CallGraph, r) {
+		if CheckReachablePair(callGraph, r) {
 			ReachablePairSetArray = append(ReachablePairSetArray, r)
 		}
 	}
 
 	ReachablePairsetBasic := PairSet_Basic[:0]
 	for _, r := range PairSet_Basic {
-		if CheckReachablePair(result.CallGraph, r) {
+		if CheckReachablePair(callGraph, r) {
 			ReachablePairsetBasic = append(ReachablePairsetBasic, r)
 		}
 	}
 
 	ReachablePairsetMap := PairSet_Map[:0]
 	for _, r := range PairSet_Map {
-		if CheckReachablePair(result.CallGraph, r) {
+		if CheckReachablePair(callGraph, r) {
 			ReachablePairsetMap = append(ReachablePairsetMap, r)
 		}
 	}
@@ -253,18 +293,18 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 	}
 
 	for _, r := range ReachablePairSetField {
-		CheckHappendBefore(prog, result.CallGraph, r)
+		CheckHappendBefore(prog, callGraph, r)
 	}
 
 	for _, r := range ReachablePairSetArray {
-		CheckHappendBefore(prog, result.CallGraph, r)
+		CheckHappendBefore(prog, callGraph, r)
 	}
 	for _, r := range ReachablePairsetBasic {
-		CheckHappendBefore(prog, result.CallGraph, r)
+		CheckHappendBefore(prog, callGraph, r)
 	}
 
 	for _, r := range ReachablePairsetMap {
-		CheckHappendBefore(prog, result.CallGraph, r)
+		CheckHappendBefore(prog, callGraph, r)
 	}
 }
 
@@ -316,7 +356,7 @@ func CheckReachablePair(cg *callgraph.Graph, field [2]RecordField) bool {
 	}
 
 	startpoint := cg.Root
-	if tmp := GetParent(node1.Func); _AllowStartFromAnyFunc_ && tmp == GetParent(node2.Func) {
+	if tmp := GetParent(node1.Func); tmp == GetParent(node2.Func) {
 		startpoint = cg.Nodes[tmp]
 	}
 
@@ -536,6 +576,16 @@ type SyncMutexItem struct {
 
 type SyncMutexList []SyncMutexItem
 
+func GenContextPath(start, end *callgraph.Node) (ret ContextList) {
+	tmp := PathSearch(start, end)
+	for _, edge := range tmp {
+		if edge.Site != nil {
+			ret = append(ret, edge.Site)
+		}
+	}
+	return ret
+}
+
 func PathSearch(start, end *callgraph.Node) (ret []*callgraph.Edge) {
 	que := make([]*callgraph.Node, 0, 32)
 	seen := make(map[*callgraph.Node]bool)
@@ -554,14 +604,7 @@ func PathSearch(start, end *callgraph.Node) (ret []*callgraph.Edge) {
 			}
 			return ret
 		}
-		out_edges := make([]*callgraph.Edge, len(n.Out))
-		copy(out_edges, n.Out)
-		rand.Shuffle(len(out_edges), func(i, j int) {
-			tmp := out_edges[i]
-			out_edges[i] = out_edges[j]
-			out_edges[j] = tmp
-		})
-		for _, e := range out_edges {
+		for _, e := range n.Out {
 			if !seen[e.Callee] && e.Callee.Func.String() != "(*testing.T).Run" { // don't go into (*testing.T).Run, it's not parallel
 				seen[e.Callee] = true
 				from[e.Callee] = e
@@ -571,23 +614,6 @@ func PathSearch(start, end *callgraph.Node) (ret []*callgraph.Edge) {
 
 	}
 	return
-}
-
-func GenContextPath(start, end *callgraph.Node) (ret []ContextList) {
-	for i := 1; i <= _MAX_CTX_NUM; i++ {
-		tmp := PathSearch(start, end)
-		var tmp2 ContextList
-		for _, edge := range tmp {
-			if edge.Site != nil {
-				tmp2 = append(tmp2, edge.Site)
-			}
-		}
-		ret = append(ret, tmp2)
-		if len(ret) > _MAX_CTX_NUM {
-			break
-		}
-	}
-	return ret
 }
 
 func hasTimeoutState(states []*ssa.SelectState) bool {
@@ -889,79 +915,58 @@ func CheckHappendBefore(prog *ssa.Program, cg *callgraph.Graph, field [2]RecordF
 	}
 
 	startpoint := cg.Root
-	if tmp := GetParent(node1.Func); _AllowStartFromAnyFunc_ && tmp == GetParent(node2.Func) {
+	if tmp := GetParent(node1.Func); tmp == GetParent(node2.Func) {
 		startpoint = cg.Nodes[tmp]
 	}
 
-	contextlist1 := GenContextPath(startpoint, node1)
-	for i := range contextlist1 {
-		contextlist1[i] = append(contextlist1[i], *field[0].ins)
-	}
+	ctx1 := append(GenContextPath(startpoint, node1), *field[0].ins)
+	ctx2 := append(GenContextPath(startpoint, node2), *field[1].ins)
 
-	contextlist2 := GenContextPath(startpoint, node2)
-	for i := range contextlist2 {
-		contextlist2[i] = append(contextlist2[i], *field[1].ins)
-	}
+	set1 := GetBeforeAfertSet(ctx1)
+	set2 := GetBeforeAfertSet(ctx2)
 
-	var BASet1, BASet2 [][2]SyncMutexList
-
-	for i := range contextlist1 {
-		BASet1 = append(BASet1, GetBeforeAfertSet(contextlist1[i]))
-	}
-
-	for i := range contextlist2 {
-		BASet2 = append(BASet2, GetBeforeAfertSet(contextlist2[i]))
-	}
-
-	for i, set1 := range BASet1 {
-		ctx1 := contextlist1[i]
-		for j, set2 := range BASet2 {
-			ctx2 := contextlist2[j]
-
-			if len(ctx1) == len(ctx2) {
-				isSame := true
-				for i := len(ctx1) - 2; i >= 0; i-- {
-					if ctx1[i] != ctx2[i] {
-						isSame = false
-						break
-					}
-				}
-				if isSame {
-					continue
-				}
-			}
-
-			if !hasGoCall(ctx1) && !hasGoCall(ctx2) {
-				continue
-			}
-
-			flag := 0
-			//Find Go1 in Afterset2
-			if FindGoCallInAfterSet(ctx1, set2[1], field[1].ins) {
-				flag = 1
-				continue
-			}
-			//Find Go2 in Afterset1
-			if FindGoCallInAfterSet(ctx2, set1[1], field[0].ins) {
-				flag = -1
-				continue
-			}
-
-			if HappensBeforeFromSet(set1[0], set2[1]) {
-				flag = 1
-				continue
-			}
-
-			if HappensBeforeFromSet(set2[0], set1[1]) {
-				flag = -1
-				continue
-			}
-
-			if flag == 0 {
-				ReportRaceWithCtx(prog, field, [2]ContextList{ctx1, ctx2})
-				return
+	if len(ctx1) == len(ctx2) {
+		isSame := true
+		for i := len(ctx1) - 2; i >= 0; i-- {
+			if ctx1[i] != ctx2[i] {
+				isSame = false
+				break
 			}
 		}
+		if isSame {
+			return
+		}
+	}
+
+	if !hasGoCall(ctx1) && !hasGoCall(ctx2) {
+		return
+	}
+
+	flag := 0
+	//Find Go1 in Afterset2
+	if FindGoCallInAfterSet(ctx1, set2[1], field[1].ins) {
+		flag = 1
+		return
+	}
+	//Find Go2 in Afterset1
+	if FindGoCallInAfterSet(ctx2, set1[1], field[0].ins) {
+		flag = -1
+		return
+	}
+
+	if HappensBeforeFromSet(set1[0], set2[1]) {
+		flag = 1
+		return
+	}
+
+	if HappensBeforeFromSet(set2[0], set1[1]) {
+		flag = -1
+		return
+	}
+
+	if flag == 0 {
+		ReportRaceWithCtx(prog, field, [2]ContextList{ctx1, ctx2})
+		return
 	}
 }
 
