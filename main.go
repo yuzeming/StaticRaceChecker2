@@ -15,14 +15,13 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 )
 
 const _debug_print_ = true
-const _MAX_CTX_NUM = 1
 const _IGNORE_TIMEOUT = false
 const _ReqOneInAnnoFunc_ = true
 const _ReqFastSame_ = true
-const _AllowStartFromAnyFunc_ = true
 const _UseTestCase_ = true
 
 type RecordField struct {
@@ -84,10 +83,7 @@ var RecordSet_Array []RecordField
 var RecordSet_Basic []RecordField
 var RecordSet_Map []RecordField
 
-var PairSet_Field [][2]RecordField
-var PairSet_Array [][2]RecordField
-var PairSet_Basic [][2]RecordField
-var PairSet_Map [][2]RecordField
+var PairSet [][2]RecordField
 
 func GetAnnoFunctionList(fn *ssa.Function) (anfn []*ssa.Function) {
 	anfn = append(anfn, fn)
@@ -98,7 +94,6 @@ func GetAnnoFunctionList(fn *ssa.Function) (anfn []*ssa.Function) {
 }
 
 func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
-
 	var mainpkgs []*ssa.Package
 	for _, pkg := range pkgs {
 		if pkg != nil {
@@ -143,7 +138,7 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 		}
 
 		if pkgset[fn.Pkg] && callGraph.Nodes[fn] == nil && fn.Parent() == nil {
-			println("dead code", fn.String())
+			//println("dead code", fn.String())
 			//Add fake cg node to improve cover
 			annoFnSet := make(map[*ssa.Function]bool)
 			for _, fn := range GetAnnoFunctionList(fn) {
@@ -194,29 +189,14 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 		}
 	}
 
-	PairSet_Field = GenPair(RecordSet_Field)
-	PairSet_Array = GenPair(RecordSet_Array)
-	PairSet_Basic = GenPair(RecordSet_Basic)
-	PairSet_Map = GenPair(RecordSet_Map)
+	PairSet = append(PairSet, GenPair(RecordSet_Field)...)
+	PairSet = append(PairSet, GenPair(RecordSet_Array)...)
+	PairSet = append(PairSet, GenPair(RecordSet_Basic)...)
+	PairSet = append(PairSet, GenPair(RecordSet_Map)...)
 
 	if _debug_print_ {
-		println("Field Pair")
-		for i, r := range PairSet_Field {
-			println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
-		}
-
-		println("Array Pair")
-		for i, r := range PairSet_Array {
-			println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
-		}
-
-		println("Basic Pair")
-		for i, r := range PairSet_Basic {
-			println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
-		}
-
-		println("Map Pair")
-		for i, r := range PairSet_Map {
+		println("PairSet")
+		for i, r := range PairSet {
 			println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
 		}
 	}
@@ -236,68 +216,21 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 		}
 	}
 
-	ReachablePairSetField := PairSet_Field[:0]
-	for _, r := range PairSet_Field {
+	ReachablePairSet := PairSet[:0]
+	for _, r := range PairSet {
 		if CheckReachablePair(callGraph, r) {
-			ReachablePairSetField = append(ReachablePairSetField, r)
-		}
-	}
-
-	ReachablePairSetArray := PairSet_Array[:0]
-	for _, r := range PairSet_Array {
-		if CheckReachablePair(callGraph, r) {
-			ReachablePairSetArray = append(ReachablePairSetArray, r)
-		}
-	}
-
-	ReachablePairsetBasic := PairSet_Basic[:0]
-	for _, r := range PairSet_Basic {
-		if CheckReachablePair(callGraph, r) {
-			ReachablePairsetBasic = append(ReachablePairsetBasic, r)
-		}
-	}
-
-	ReachablePairsetMap := PairSet_Map[:0]
-	for _, r := range PairSet_Map {
-		if CheckReachablePair(callGraph, r) {
-			ReachablePairsetMap = append(ReachablePairsetMap, r)
+			ReachablePairSet = append(ReachablePairSet, r)
 		}
 	}
 
 	if _debug_print_ {
-		println("Reachable Field Pair")
-		for i, r := range ReachablePairSetField {
-			println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
-		}
-
-		println("Reachable Array Pair")
-		for i, r := range ReachablePairSetArray {
-			println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
-		}
-
-		println("Reachable Basic Pair")
-		for i, r := range ReachablePairsetBasic {
-			println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
-		}
-
-		println("Reachable Map Pair")
-		for i, r := range ReachablePairsetMap {
+		println("Reachable Pair")
+		for i, r := range ReachablePairSet {
 			println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
 		}
 	}
 
-	for _, r := range ReachablePairSetField {
-		CheckHappendBefore(prog, callGraph, r)
-	}
-
-	for _, r := range ReachablePairSetArray {
-		CheckHappendBefore(prog, callGraph, r)
-	}
-	for _, r := range ReachablePairsetBasic {
-		CheckHappendBefore(prog, callGraph, r)
-	}
-
-	for _, r := range ReachablePairsetMap {
+	for _, r := range ReachablePairSet {
 		CheckHappendBefore(prog, callGraph, r)
 	}
 }
@@ -881,7 +814,11 @@ func PrintCtx(prog *ssa.Program, ctx ContextList) {
 	}
 }
 
+var outputMux sync.Mutex
+
 func ReportRaceWithCtx(prog *ssa.Program, field [2]RecordField, ctx [2]ContextList) {
+	outputMux.Lock()
+	defer outputMux.Unlock()
 	println("Race Found:[ZZZ]")
 	println(toString(prog, field[0].ins), "Func:", (*field[0].ins).Parent().Name())
 	PrintCtx(prog, ctx[0])
@@ -946,31 +883,13 @@ func CheckHappendBefore(prog *ssa.Program, cg *callgraph.Graph, field [2]RecordF
 		return
 	}
 
-	flag := 0
-	//Find Go1 in Afterset2
-	if FindGoCallInAfterSet(ctx1, set2[1], field[1].ins) {
-		flag = 1
-		return
-	}
-	//Find Go2 in Afterset1
-	if FindGoCallInAfterSet(ctx2, set1[1], field[0].ins) {
-		flag = -1
-		return
-	}
-
-	if HappensBeforeFromSet(set1[0], set2[1]) {
-		flag = 1
-		return
-	}
-
-	if HappensBeforeFromSet(set2[0], set1[1]) {
-		flag = -1
-		return
-	}
-
-	if flag == 0 {
+	if FindGoCallInAfterSet(ctx1, set2[1], field[1].ins) ||
+		FindGoCallInAfterSet(ctx2, set1[1], field[0].ins) ||
+		HappensBeforeFromSet(set1[0], set2[1]) ||
+		HappensBeforeFromSet(set2[0], set1[1]) {
+		// this ok, no nothing
+	} else {
 		ReportRaceWithCtx(prog, field, [2]ContextList{ctx1, ctx2})
-		return
 	}
 }
 
