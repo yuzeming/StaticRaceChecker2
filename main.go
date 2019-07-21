@@ -401,8 +401,6 @@ func analysisInstrs(instrs *ssa.Instruction) {
 			case "LoadInt32", "LoadInt64", "LoadPointer", "LoadUint32", "LoadUint64", "LoadUintptr":
 				tmp := RecordField{instrs, ins.Call.Args[0], 0, false, true}
 				RecordSet_Basic = append(RecordSet_Basic, tmp)
-				tmp2 := RecordField{instrs, ins.Call.Args[1], 0, true, false}
-				RecordSet_Basic = append(RecordSet_Basic, tmp2)
 			case "StoreInt32", "StoreInt64", "StorePointer", "StoreUint32", "StoreUint64", "StoreUintptr":
 				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, true}
 				RecordSet_Basic = append(RecordSet_Basic, tmp)
