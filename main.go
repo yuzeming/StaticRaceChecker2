@@ -358,6 +358,9 @@ func analysisInstrs(instrs *ssa.Instruction) {
 		if _, ok := elem.(*types.Basic); ok && ins.Heap {
 			ref := *ins.Referrers()
 			for i := range ref {
+				if _, ok := ref[i].(*ssa.Call); ok {
+					continue // for atomic call
+				}
 				tmp := RecordField{&ref[i], ins, 0, isWrite(ref[i], ins), false}
 				RecordSet_Basic = append(RecordSet_Basic, tmp)
 			}
@@ -424,10 +427,17 @@ func analysisInstrs(instrs *ssa.Instruction) {
 			case "builtin append":
 				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, false}
 				RecordSet_Array = append(RecordSet_Array, tmp)
-				tmp2 := RecordField{instrs, ins.Call.Args[1], 0, false, false}
-				RecordSet_Array = append(RecordSet_Array, tmp2)
+				switch ins.Call.Args[1].Type().(type) {
+				case *types.Basic:
+					tmp2 := RecordField{instrs, ins.Call.Args[1], 0, false, false}
+					RecordSet_Basic = append(RecordSet_Basic, tmp2)
+				default:
+					tmp2 := RecordField{instrs, ins.Call.Args[1], 0, false, false}
+					RecordSet_Array = append(RecordSet_Array, tmp2)
+				}
 			case "(*os.File).Write", "(*os.File).Read":
-				// TODO Add dst read write record
+				tmp2 := RecordField{instrs, ins.Call.Args[1], 0, fn == "(*os.File).Write", false}
+				RecordSet_Array = append(RecordSet_Array, tmp2)
 				fallthrough
 			case "(*os.File).Close":
 				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, false}
