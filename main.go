@@ -23,6 +23,7 @@ const _IGNORE_TIMEOUT = false
 const _ReqOneInAnnoFunc_ = true
 const _ReqFastSame_ = true
 const _UseTestCase_ = true
+const _ChaCallGraph_ = true
 
 type RecordField struct {
 	ins      *ssa.Instruction
@@ -110,7 +111,7 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 
 	cg2 := cha.CallGraph(prog)
 
-	if len(mainpkgs) == 0 {
+	if len(mainpkgs) == 0 || _ChaCallGraph_ {
 		println("No Main Package Found")
 		callGraph = cg2
 	} else {
@@ -120,9 +121,12 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 		}
 		result, err := pointer.Analyze(config)
 		if err != nil {
-			panic(err)
+			println("Panic At pointer.Analyze")
+			callGraph = cg2
+		} else {
+			callGraph = result.CallGraph
 		}
-		callGraph = result.CallGraph
+
 	}
 
 	FuncsList := ssautil.AllFunctions(prog)
