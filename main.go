@@ -18,12 +18,12 @@ import (
 	"sync"
 )
 
-const _debug_print_ = true
+const _debug_print_ = false
 const _IGNORE_TIMEOUT = false
 const _ReqOneInAnnoFunc_ = true
 const _ReqFastSame_ = true
 const _UseTestCase_ = true
-const _ChaCallGraph_ = true
+const _ChaCallGraph_ = false
 
 type RecordField struct {
 	ins      *ssa.Instruction
@@ -112,7 +112,7 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 	cg2 := cha.CallGraph(prog)
 
 	if len(mainpkgs) == 0 || _ChaCallGraph_ {
-		println("No Main Package Found")
+		//println("No Main Package Found")
 		callGraph = cg2
 	} else {
 		config := &pointer.Config{
@@ -121,7 +121,7 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 		}
 		result, err := pointer.Analyze(config)
 		if err != nil {
-			println("Panic At pointer.Analyze")
+			//println("Panic At pointer.Analyze")
 			callGraph = cg2
 		} else {
 			callGraph = result.CallGraph
@@ -325,6 +325,10 @@ func isWrite(instruction ssa.Instruction, address ssa.Value) bool {
 
 func toString(pass *ssa.Program, op *ssa.Instruction) string {
 	return (*pass.Fset).Position((*op).Pos()).String()
+}
+
+func toStringValue(pass *ssa.Program, val *ssa.Value) string {
+	return (*pass.Fset).Position((*val).Pos()).String()
 }
 
 func analysisInstrs(instrs *ssa.Instruction) {
@@ -826,18 +830,28 @@ func PrintCtx(prog *ssa.Program, ctx ContextList) {
 	}
 }
 
+type Result struct {
+	field [2]RecordField
+	ctx   [2]ContextList
+}
+
+var ResultSet = make(map[ssa.Value][]*Result)
 var outputMux sync.Mutex
 
 func ReportRaceWithCtx(prog *ssa.Program, field [2]RecordField, ctx [2]ContextList) {
 	outputMux.Lock()
 	defer outputMux.Unlock()
-	println("Race Found:[ZZZ]")
-	println(toString(prog, field[0].ins), "Func:", (*field[0].ins).Parent().Name())
-	PrintCtx(prog, ctx[0])
-	println("============")
-	println(toString(prog, field[1].ins), "Func:", (*field[1].ins).Parent().Name())
-	PrintCtx(prog, ctx[1])
-	println("============")
+
+	val := GetValue(&field[0].value)
+	ResultSet[*val] = append(ResultSet[*val], &Result{field: field, ctx: ctx})
+
+	//println("Race Found:[ZZZ]")
+	//println(toString(prog, field[0].ins), "Func:", (*field[0].ins).Parent().Name())
+	//PrintCtx(prog, ctx[0])
+	//println("============")
+	//println(toString(prog, field[1].ins), "Func:", (*field[1].ins).Parent().Name())
+	//PrintCtx(prog, ctx[1])
+	//println("============")
 }
 
 func hasGoCall(ctx ContextList) bool {
@@ -906,7 +920,7 @@ func CheckHappendBefore(prog *ssa.Program, cg *callgraph.Graph, field [2]RecordF
 }
 
 func main() {
-	println("Run for [ZZZ]:", os.Args[1])
+	//println("Run for [ZZZ]:", os.Args[1])
 	cfg := packages.Config{Mode: packages.LoadAllSyntax, Tests: _UseTestCase_}
 	initial, err := packages.Load(&cfg, os.Args[1])
 	if err != nil {
@@ -939,4 +953,17 @@ func main() {
 	// Build SSA code for the whole program.
 	prog.Build()
 	RacePairsAnalyzerRun(prog, pkgs)
+
+	for k, v := range ResultSet {
+		println("Race Found:[ZZZ]", toStringValue(prog, &k))
+		for _, c := range v {
+			println(toString(prog, c.field[0].ins), "Func:", (*c.field[0].ins).Parent().Name())
+			//PrintCtx(prog, ctx[0])
+			//println("============")
+			println(toString(prog, c.field[1].ins), "Func:", (*c.field[1].ins).Parent().Name())
+			//PrintCtx(prog, ctx[1])
+			println("============")
+		}
+	}
+
 }
