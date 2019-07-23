@@ -548,7 +548,10 @@ func PathSearch(start, end *callgraph.Node) (ret []*callgraph.Edge) {
 			return ret
 		}
 		for _, e := range n.Out {
-			if !seen[e.Callee] && e.Callee.Func.String() != "(*testing.T).Run" { // don't go into (*testing.T).Run, it's not parallel
+			if !seen[e.Callee] &&
+				e.Callee.Func.String() != "(*testing.T).Run" &&
+				e.Callee.Func.String() != "(*testing.B).Run" &&
+				e.Callee.Func.String() != "(*testing.M).Run" { // don't go into (*testing.T).Run, it's not parallel
 				seen[e.Callee] = true
 				from[e.Callee] = e
 				que = append(que, e.Callee)
