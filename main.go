@@ -10,7 +10,6 @@ import (
 	"golang.org/x/tools/go/pointer"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
-	"log"
 	"os"
 	"reflect"
 	"sort"
@@ -930,9 +929,15 @@ func main() {
 	cfg := packages.Config{Mode: packages.LoadAllSyntax, Tests: _UseTestCase_}
 	initial, err := packages.Load(&cfg, os.Args[1])
 	if err != nil {
-		log.Fatal(err)
+		return
+		//log.Fatal(err)
 	}
-	if packages.PrintErrors(initial) > 0 {
+	pkgerr := 0
+	packages.Visit(initial, nil, func(pkg *packages.Package) {
+		pkgerr += len(pkg.Errors)
+	})
+
+	if (pkgerr > 0 && !_debug_print_) || packages.PrintErrors(initial) > 0 {
 		return
 	}
 
