@@ -233,8 +233,20 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 		}
 	}
 
+	const MX = 64
+	ch := make(chan int, MX)
+
 	for _, r := range ReachablePairSet {
-		CheckHappendBefore(prog, callGraph, r)
+		r1 := r
+		ch <- 1
+		go func() {
+			CheckHappendBefore(prog, callGraph, r1)
+			<-ch
+		}()
+	}
+
+	for i := 0; i < MX; i++ {
+		ch <- 1
 	}
 }
 
@@ -831,7 +843,7 @@ func HappensBeforeFromSet(beforeList SyncMutexList, afterList SyncMutexList) boo
 
 func PrintCtx(prog *ssa.Program, ctx ContextList) {
 	for i, c := range ctx {
-		println("\t#", i, (*prog.Fset).Position(c.Pos()).String(), c.String())
+		fmt.Println("\t#", i, (*prog.Fset).Position(c.Pos()).String(), c.String())
 	}
 }
 
@@ -925,7 +937,7 @@ func CheckHappendBefore(prog *ssa.Program, cg *callgraph.Graph, field [2]RecordF
 }
 
 func main() {
-	//println("Run for [ZZZ]:", os.Args[1])
+	fmt.Fprintln(os.Stderr, "Run for [ZZZ]:", os.Args[1])
 	cfg := packages.Config{Mode: packages.LoadAllSyntax, Tests: _UseTestCase_}
 	initial, err := packages.Load(&cfg, os.Args[1])
 	if err != nil {
@@ -966,14 +978,14 @@ func main() {
 	RacePairsAnalyzerRun(prog, pkgs)
 
 	for k, v := range ResultSet {
-		println("Race Found:[ZZZ]", toStringValue(prog, &k))
+		fmt.Println("Race Found:[ZZZ]", toStringValue(prog, &k), k.String())
 		for _, c := range v {
-			println(toString(prog, c.field[0].ins), "Func:", (*c.field[0].ins).Parent().Name())
+			fmt.Println(toString(prog, c.field[0].ins), "Func:", (*c.field[0].ins).Parent().Name())
 			PrintCtx(prog, c.ctx[0])
-			println("============")
-			println(toString(prog, c.field[1].ins), "Func:", (*c.field[1].ins).Parent().Name())
+			fmt.Println("============")
+			fmt.Println(toString(prog, c.field[1].ins), "Func:", (*c.field[1].ins).Parent().Name())
 			PrintCtx(prog, c.ctx[1])
-			println("============")
+			fmt.Println("============")
 		}
 	}
 
