@@ -470,6 +470,9 @@ func visitBasicBlock(fnname string, bb *ssa.BasicBlock) {
 
 func runFunc1(fn *ssa.Function) {
 	fnname := fn.String()
+	if strings.HasPrefix(fnname, "Benchmark") {
+		return
+	}
 	if _debug_print_ {
 		println("runFunc1", fnname, fn)
 	}
@@ -548,10 +551,10 @@ func PathSearch(start, end *callgraph.Node) (ret []*callgraph.Edge) {
 			return ret
 		}
 		for _, e := range n.Out {
-			if !seen[e.Callee] &&
-				e.Callee.Func.String() != "(*testing.T).Run" &&
-				e.Callee.Func.String() != "(*testing.B).Run" &&
-				e.Callee.Func.String() != "(*testing.M).Run" { // don't go into (*testing.T).Run, it's not parallel
+			if fn := e.Callee.Func.String(); !seen[e.Callee] &&
+				fn != "(*testing.T).Run" &&
+				fn != "(*testing.B).Run" &&
+				fn != "(*testing.M).Run" { // don't go into (*testing.T).Run, it's not parallel
 				seen[e.Callee] = true
 				from[e.Callee] = e
 				que = append(que, e.Callee)
@@ -867,12 +870,12 @@ func hasGoCall(ctx ContextList) bool {
 }
 
 func hasGoInLoop(ctx ContextList) bool {
-	x := len(ctx)
-	for i := 0; i < x-1; i++ {
-		if _, ok := ctx[i].(*ssa.Go); ok && CheckReachableInstr(ctx[i], ctx[i]) {
-			return true
-		}
-	}
+	//x := len(ctx)
+	//for i := 0; i < x-1; i++ {
+	//	if _, ok := ctx[i].(*ssa.Go); ok && CheckReachableInstr(ctx[i], ctx[i]) {
+	//		return true
+	//	}
+	//}
 	return false
 }
 
@@ -961,10 +964,10 @@ func main() {
 		println("Race Found:[ZZZ]", toStringValue(prog, &k))
 		for _, c := range v {
 			println(toString(prog, c.field[0].ins), "Func:", (*c.field[0].ins).Parent().Name())
-			//PrintCtx(prog, ctx[0])
-			//println("============")
+			PrintCtx(prog, c.ctx[0])
+			println("============")
 			println(toString(prog, c.field[1].ins), "Func:", (*c.field[1].ins).Parent().Name())
-			//PrintCtx(prog, ctx[1])
+			PrintCtx(prog, c.ctx[1])
 			println("============")
 		}
 	}
