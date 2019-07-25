@@ -118,22 +118,13 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 			Mains:          mainpkgs,
 			BuildCallGraph: true,
 		}
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					println("Recovered in f", r)
-					callGraph = cg2
-				}
-			}()
-			result, err := pointer.Analyze(config)
-			if err != nil {
-				//println("Panic At pointer.Analyze")
-				callGraph = cg2
-			} else {
-				callGraph = result.CallGraph
-			}
-		}()
-
+		result, err := pointer.Analyze(config)
+		if err != nil {
+			//println("Panic At pointer.Analyze")
+			callGraph = cg2
+		} else {
+			callGraph = result.CallGraph
+		}
 	}
 
 	FuncsList := ssautil.AllFunctions(prog)
