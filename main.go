@@ -450,6 +450,9 @@ func analysisInstrs(instrs *ssa.Instruction) {
 					tmp2 := RecordField{instrs, ins.Call.Args[1], 0, false, false}
 					RecordSet_Array = append(RecordSet_Array, tmp2)
 				}
+			case "builtin len":
+				tmp := RecordField{instrs, ins.Call.Args[0], 0, false, false}
+				RecordSet_Array = append(RecordSet_Array, tmp)
 			case "(*os.File).Write", "(*os.File).Read":
 				tmp2 := RecordField{instrs, ins.Call.Args[1], 0, fn == "(*os.File).Write", false}
 				RecordSet_Array = append(RecordSet_Array, tmp2)
@@ -613,10 +616,10 @@ func GetSyncValue(instr *ssa.Instruction, dir int) (ret SyncMutexList) {
 	case *ssa.Call:
 		sig := ins.Call.Value.String()
 		switch sig {
-		//case "(*sync.Mutex).Lock":
-		//	return SyncMutexList{SyncMutexItem{value:ins.Call.Args[0],deferCall:false,op:10}} //10 for Lock
-		//case "(*sync.Mutex).Unlock":
-		//	return SyncMutexList{SyncMutexItem{value:ins.Call.Args[0],deferCall:false,op:11}} //11 for Unlock
+		case "(*sync.Mutex).Lock":
+			return SyncMutexList{SyncMutexItem{value: ins.Call.Args[0], deferCall: false, op: 10}} //10 for Lock
+		case "(*sync.Mutex).Unlock":
+			return SyncMutexList{SyncMutexItem{value: ins.Call.Args[0], deferCall: false, op: 11}} //11 for Unlock
 		case "(*sync.WaitGroup).Done":
 			return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 20, false}} //20 for Done
 		case "(*sync.WaitGroup).Wait":
@@ -640,10 +643,10 @@ func GetSyncValue(instr *ssa.Instruction, dir int) (ret SyncMutexList) {
 	case *ssa.Defer:
 		sig := ins.Call.Value.String()
 		switch sig {
-		//case "(*sync.Mutex).Lock":
-		//	panic("Call Lock in defer???")
-		//case "(*sync.Mutex).Unlock":
-		//	return SyncMutexList{SyncMutexItem{value:ins.Call.Args[0],deferCall:true,op:11}} //11 for Unlock
+		case "(*sync.Mutex).Lock":
+			//panic("Call Lock in defer???")
+		case "(*sync.Mutex).Unlock":
+			return SyncMutexList{SyncMutexItem{value: ins.Call.Args[0], deferCall: true, op: 11}} //11 for Unlock
 		case "(*sync.WaitGroup).Done":
 			return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 20, true}} //20 for Done
 		case "(*sync.WaitGroup).Wait":
@@ -890,6 +893,39 @@ func hasGoInLoop(ctx ContextList) bool {
 	return false
 }
 
+func CalcMutexMap(set SyncMutexList) (ret map[ssa.Value]int) {
+	ret = make(map[ssa.Value]int)
+	for _, item := range set {
+		if item.op == 10 || item.op == 11 {
+			value := item.value
+			//println(value)
+			if _, ok := ret[value]; !ok {
+				ret[value] = 0
+			}
+			if item.op == 10 { //lock
+				ret[value]++
+			} else { //item.op ==11 //unlock
+				ret[value]--
+			}
+		}
+	}
+
+	return ret
+}
+
+func hasSameLock(set1, set2 SyncMutexList) bool {
+	Map1 := CalcMutexMap(set1)
+	Map2 := CalcMutexMap(set2)
+	for k1, v1 := range Map1 {
+		for k2, v2 := range Map2 {
+			if v1 > 0 && v2 > 0 && FastSame(&k1, &k2) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func CheckHappendBefore(prog *ssa.Program, cg *callgraph.Graph, field [2]RecordField) {
 	node1 := cg.Nodes[(*field[0].ins).Parent()]
 	node2 := cg.Nodes[(*field[1].ins).Parent()]
@@ -924,6 +960,18 @@ func CheckHappendBefore(prog *ssa.Program, cg *callgraph.Graph, field [2]RecordF
 
 	if !hasGoCall(ctx1) && !hasGoCall(ctx2) {
 		return
+	}
+
+	elem := (*GetValue(&field[0].value)).Type().Underlying().(*types.Pointer).Elem()
+	switch elem.(type) {
+	case *types.Slice:
+		if hasSameLock(set1[0], set2[0]) {
+			return
+		}
+	case *types.Basic:
+		if hasSameLock(set1[0], set2[0]) {
+			return
+		}
 	}
 
 	if FindGoCallInAfterSet(ctx1, set2[1], field[1].ins) ||
