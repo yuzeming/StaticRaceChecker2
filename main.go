@@ -118,13 +118,21 @@ func RacePairsAnalyzerRun(prog *ssa.Program, pkgs []*ssa.Package) {
 			Mains:          mainpkgs,
 			BuildCallGraph: true,
 		}
-		result, err := pointer.Analyze(config)
-		if err != nil {
-			//println("Panic At pointer.Analyze")
-			callGraph = cg2
-		} else {
-			callGraph = result.CallGraph
-		}
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					println("Recovered in f", r)
+					callGraph = cg2
+				}
+			}()
+			result, err := pointer.Analyze(config)
+			if err != nil {
+				//println("Panic At pointer.Analyze")
+				callGraph = cg2
+			} else {
+				callGraph = result.CallGraph
+			}
+		}()
 
 	}
 
@@ -483,7 +491,7 @@ func visitBasicBlock(fnname string, bb *ssa.BasicBlock) {
 }
 
 func runFunc1(fn *ssa.Function) {
-	fnname := fn.String()
+	fnname := fn.Name()
 	if strings.HasPrefix(fnname, "Benchmark") {
 		return
 	}
