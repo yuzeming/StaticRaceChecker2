@@ -965,16 +965,22 @@ func CheckHappendBefore(prog *ssa.Program, cg *callgraph.Graph, field [2]RecordF
 		return
 	}
 
-	elem := GetValue(field[0].value).Type().Underlying().(*types.Pointer).Elem()
-	switch elem.(type) {
+	flag := false
+	elem := GetValue(field[0].value).Type().Underlying()
+	switch p := elem.(type) {
 	case *types.Slice:
-		if hasSameLock(set1[0], set2[0]) {
-			return
+		flag = true
+	case *types.Pointer:
+		switch p.Elem().(type) {
+		case *types.Slice:
+			flag = true
+		case *types.Basic:
+			flag = true
 		}
-	case *types.Basic:
-		if hasSameLock(set1[0], set2[0]) {
-			return
-		}
+	}
+
+	if flag && hasSameLock(set1[0], set2[0]) {
+		return
 	}
 
 	if FindGoCallInAfterSet(ctx1, set2[1], field[1].ins) ||
@@ -1037,7 +1043,7 @@ func main() {
 		for _, c := range v {
 			fmt.Println(toString(prog, c.field[0].ins), "Func:", (*c.field[0].ins).Parent().Name())
 			PrintCtx(prog, c.ctx[0])
-			fmt.Println("============")
+			fmt.Println("------------")
 			fmt.Println(toString(prog, c.field[1].ins), "Func:", (*c.field[1].ins).Parent().Name())
 			PrintCtx(prog, c.ctx[1])
 			fmt.Println("============")
