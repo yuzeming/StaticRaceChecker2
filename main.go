@@ -32,16 +32,16 @@ type RecordField struct {
 	isAtomic bool
 }
 
-var FastFreeVarMap = make(map[*ssa.FreeVar]*ssa.Value)
+var FastFreeVarMap = make(map[*ssa.FreeVar]ssa.Value)
 
-func AddFreeVarMap(a *ssa.FreeVar, b *ssa.Value) {
+func AddFreeVarMap(a *ssa.FreeVar, b ssa.Value) {
 	FastFreeVarMap[a] = b
 }
 
-func LockupFreeVar(a *ssa.FreeVar) (ret *ssa.Value) {
+func LockupFreeVar(a *ssa.FreeVar) (ret ssa.Value) {
 	ret = FastFreeVarMap[a]
 	for ret != nil {
-		a2, isFreeVal := (*ret).(*ssa.FreeVar)
+		a2, isFreeVal := ret.(*ssa.FreeVar)
 		if isFreeVal {
 			ret2, ok := FastFreeVarMap[a2]
 			if ok {
@@ -56,23 +56,23 @@ func LockupFreeVar(a *ssa.FreeVar) (ret *ssa.Value) {
 	return ret
 }
 
-func GetValue(a *ssa.Value) *ssa.Value {
-	switch b := (*a).(type) {
+func GetValue(a ssa.Value) ssa.Value {
+	switch b := a.(type) {
 	case *ssa.UnOp:
-		return GetValue(&b.X)
+		return GetValue(b.X)
 	case *ssa.FieldAddr:
-		return GetValue(&b.X)
+		return GetValue(b.X)
 	}
 	return a
 }
 
-func FastSame(a *ssa.Value, b *ssa.Value) bool {
+func FastSame(a ssa.Value, b ssa.Value) bool {
 	a = GetValue(a)
 	b = GetValue(b)
-	if fa, isok := (*a).(*ssa.FreeVar); isok {
+	if fa, isok := a.(*ssa.FreeVar); isok {
 		a = LockupFreeVar(fa)
 	}
-	if fb, isok := (*b).(*ssa.FreeVar); isok {
+	if fb, isok := b.(*ssa.FreeVar); isok {
 		b = LockupFreeVar(fb)
 	}
 	return a == b || reflect.DeepEqual(a, b)
@@ -268,7 +268,7 @@ func GenPair(RecordSet []RecordField) (ret [][2]RecordField) {
 						(*pi.ins).Block() != (*pj.ins).Block() &&
 						(!pi.isAtomic || !pj.isAtomic) &&
 						(!_ReqOneInAnnoFunc_ || isInAnnoFunc(pi.ins) || isInAnnoFunc(pj.ins)) &&
-						(!_ReqFastSame_ || FastSame(&pi.value, &pj.value)) &&
+						(!_ReqFastSame_ || FastSame(pi.value, pj.value)) &&
 						hasPos(pi.ins) && hasPos((pj.ins)) {
 						ret = append(ret, [2]RecordField{pi, pj})
 					}
@@ -404,7 +404,7 @@ func analysisInstrs(instrs *ssa.Instruction) {
 	case *ssa.MakeClosure:
 		freevar := ins.Fn.(*ssa.Function).FreeVars
 		for i := range ins.Bindings {
-			AddFreeVarMap(freevar[i], &ins.Bindings[i])
+			AddFreeVarMap(freevar[i], ins.Bindings[i])
 		}
 	case *ssa.Call:
 		fn := ins.Call.Value.String()
@@ -786,8 +786,8 @@ func CheckReachableInstr(start, end ssa.Instruction) bool {
 
 func isCopyToHeap(call, ins ssa.Instruction) bool {
 	if ins2, ok := ins.(*ssa.Store); ok {
-		addr := GetValue(&ins2.Addr)
-		if addr2, ok2 := (*addr).(*ssa.Alloc); ok2 {
+		addr := GetValue(ins2.Addr)
+		if addr2, ok2 := addr.(*ssa.Alloc); ok2 {
 			return CheckReachableInstr(call, addr2)
 		}
 	}
@@ -823,7 +823,7 @@ func HappensBeforeFromSet(beforeList SyncMutexList, afterList SyncMutexList) boo
 	for _, itemB := range beforeList {
 		if itemB.op < 10 { // is a chan
 			for _, itemA := range afterList {
-				if itemA.op < 10 && itemA.op != itemB.op && FastSame(&itemA.value, &itemB.value) {
+				if itemA.op < 10 && itemA.op != itemB.op && FastSame(itemA.value, itemB.value) {
 					return true
 				}
 			}
@@ -834,7 +834,7 @@ func HappensBeforeFromSet(beforeList SyncMutexList, afterList SyncMutexList) boo
 	for _, itemB := range beforeList {
 		if itemB.op == 21 { // is a Wg.Wait
 			for _, itemA := range afterList {
-				if itemA.op == 20 && FastSame(&itemA.value, &itemB.value) { // is a Wg.Done
+				if itemA.op == 20 && FastSame(itemA.value, itemB.value) { // is a Wg.Done
 					return true
 				}
 			}
@@ -862,8 +862,11 @@ func ReportRaceWithCtx(prog *ssa.Program, field [2]RecordField, ctx [2]ContextLi
 	outputMux.Lock()
 	defer outputMux.Unlock()
 
-	val := GetValue(&field[0].value)
-	ResultSet[*val] = append(ResultSet[*val], &Result{field: field, ctx: ctx})
+	val := GetValue(field[0].value)
+	if freeval, ok := val.(*ssa.FreeVar); ok {
+		val = LockupFreeVar(freeval)
+	}
+	ResultSet[val] = append(ResultSet[val], &Result{field: field, ctx: ctx})
 
 	//println("Race Found:[ZZZ]")
 	//println(toString(prog, field[0].ins), "Func:", (*field[0].ins).Parent().Name())
@@ -918,7 +921,7 @@ func hasSameLock(set1, set2 SyncMutexList) bool {
 	Map2 := CalcMutexMap(set2)
 	for k1, v1 := range Map1 {
 		for k2, v2 := range Map2 {
-			if v1 > 0 && v2 > 0 && FastSame(&k1, &k2) {
+			if v1 > 0 && v2 > 0 && FastSame(k1, k2) {
 				return true
 			}
 		}
@@ -962,7 +965,7 @@ func CheckHappendBefore(prog *ssa.Program, cg *callgraph.Graph, field [2]RecordF
 		return
 	}
 
-	elem := (*GetValue(&field[0].value)).Type().Underlying().(*types.Pointer).Elem()
+	elem := GetValue(field[0].value).Type().Underlying().(*types.Pointer).Elem()
 	switch elem.(type) {
 	case *types.Slice:
 		if hasSameLock(set1[0], set2[0]) {
@@ -1020,6 +1023,10 @@ func main() {
 
 	// Create SSA packages for well-typed packages and their dependencies.
 	prog, pkgs := ssautil.AllPackages(initial, 0)
+
+	if len(pkgs) > 1000 {
+		return
+	}
 
 	// Build SSA code for the whole program.
 	prog.Build()
