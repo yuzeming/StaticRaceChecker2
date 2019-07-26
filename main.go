@@ -615,9 +615,9 @@ func GetSyncValue(instr *ssa.Instruction, dir int) (ret SyncMutexList) {
 	case *ssa.Call:
 		sig := ins.Call.Value.String()
 		switch sig {
-		case "(*sync.Mutex).Lock":
+		case "(*sync.Mutex).Lock", "(*sync.RWMutex).Lock", "(*sync.RWMutex).RLock":
 			return SyncMutexList{SyncMutexItem{value: ins.Call.Args[0], deferCall: false, op: 10}} //10 for Lock
-		case "(*sync.Mutex).Unlock":
+		case "(*sync.Mutex).Unlock", "(*sync.RWMutex).Unlock", "(*sync.RWMutex).RUnlock":
 			return SyncMutexList{SyncMutexItem{value: ins.Call.Args[0], deferCall: false, op: 11}} //11 for Unlock
 		case "(*sync.WaitGroup).Done":
 			return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 20, false}} //20 for Done
@@ -625,7 +625,7 @@ func GetSyncValue(instr *ssa.Instruction, dir int) (ret SyncMutexList) {
 			return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 21, false}} //21 for Wait
 		case "builtin close":
 			if _, ischen := ins.Call.Args[0].Type().(*types.Chan); ischen {
-				return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 3, false}} //21 for close chan
+				return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 3, false}} //3 for close chan
 			}
 		case "(*golang.org/x/sync/errgroup.Group).Wait":
 			fn, ok := ins.Call.Value.(*ssa.Function)
@@ -642,9 +642,9 @@ func GetSyncValue(instr *ssa.Instruction, dir int) (ret SyncMutexList) {
 	case *ssa.Defer:
 		sig := ins.Call.Value.String()
 		switch sig {
-		case "(*sync.Mutex).Lock":
+		case "(*sync.Mutex).Lock", "(*sync.RWMutex).Lock", "(*sync.RWMutex).RLock":
 			//panic("Call Lock in defer???")
-		case "(*sync.Mutex).Unlock":
+		case "(*sync.Mutex).Unlock", "(*sync.RWMutex).Unlock", "(*sync.RWMutex).RUnlock":
 			return SyncMutexList{SyncMutexItem{value: ins.Call.Args[0], deferCall: true, op: 11}} //11 for Unlock
 		case "(*sync.WaitGroup).Done":
 			return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 20, true}} //20 for Done
@@ -652,7 +652,7 @@ func GetSyncValue(instr *ssa.Instruction, dir int) (ret SyncMutexList) {
 			return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 21, true}} //21 for Wait
 		case "builtin close":
 			if _, ischen := ins.Call.Args[0].Type().(*types.Chan); ischen {
-				return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 3, true}} //21 for close chan
+				return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 3, true}} //3 for close chan
 			}
 		case "(*golang.org/x/sync/errgroup.Group).Wait":
 			fn, ok := ins.Call.Value.(*ssa.Function)
@@ -974,6 +974,8 @@ func CheckHappendBefore(prog *ssa.Program, cg *callgraph.Graph, field [2]RecordF
 		case *types.Slice:
 			flag = true
 		case *types.Basic:
+			flag = true
+		case *types.Struct:
 			flag = true
 		}
 	}
