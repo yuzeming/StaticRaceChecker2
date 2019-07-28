@@ -1,4 +1,4 @@
-#Alloc, FreeVar and MakeClosure
+# Alloc, FreeVar and MakeClosure
 
 The Alloc instruction reserves space for a variable of the given type, zero-initializes it, and yields its address. Compiler decided where to reserves space, when this variable is shared between goroutines, it must be alloc in heap.
 
@@ -6,7 +6,7 @@ Declaration of this anonymous function contains `FreeVar`, whose free variables 
 
 The MakeClosure instruction yields a closure value whose code is Fn and whose free variables' values are supplied by Bindings. Since the MakeClouse is call only once, we can create a map from `FreeVar` to `Alloc` to determine if two values (FreeVar+FreeVar or Value+FreeVar or Value+Value) are pointed to the same variable. 
 
-#Binding Map
+# Binding Map
 ```go
 func Foo(){
   a:=1 // a
@@ -24,13 +24,13 @@ Figure #1: Binding Map
 
 we can find Foo$1:a, Foo$2:a and a are pointed to the same thing by lookuping binding map.
 
-##Step 1: Read/Write Operation Collection:
+## Step 1: Read/Write Operation Collection:
 My program goes through all functions and methods to collection write/read record about heap allocated `Alloc` and `FreeVar`, include: SSA instruction location in program ,SSA Value(Alloc or FreeVar), FieldID (if access struct fields), isAtomic.
 We categorize all record into four kinds: Read/Write about Basic Type, Struct Field,  Array/Slice and Map. 
 
-##Step #2: Collection all MakeClouse to create binding map 
+## Step #2: Collection all MakeClouse to create binding map 
 
-##Step #3: Generation race opreation pair
+## Step #3: Generation race opreation pair
 two opreations (A,B) in the same category may race if:
 1. One of A,B is in a anonymous function, and
 2. A or B is not atomic, and
@@ -39,10 +39,10 @@ two opreations (A,B) in the same category may race if:
 5. A and B are pointed to the same place determined by binding map, and
 6. A and B have the same FieldID ( for Struct Field )
 
-##Step #4: Getting Call Graph from package pointer
+## Step #4: Getting Call Graph from package pointer
 it address the problem that some functions take anonymous function as a parameter and call it or create a goroutine to call it inside. I also add test function as entry to reach as much as possible functions.
 
-###Known Limitation
+### Known Limitation
 pointer analysis can’t deal with dead function. So all dead functions miss in the call graph. For a workaround, I copy missed function and call-edge from another call graph produced by package cha which is faster and can deal with dead function but less accurate
 
 ```go
@@ -72,7 +72,7 @@ func main() {
 ```
 Figure #2
 
-##Step #5: Reachable Check
+## Step #5: Reachable Check
 two operations (A and B) could be race if and only if they can be executed at same time. My approach is not right: if there are two call path (path_A and path_B) from named function to operations A and B, and at least one `Go` go in path_A or path_B. For convenience, I add operation as last item.
 
 In Figure #2, for Write #2, Write #4 and READ #5, their paths should be
@@ -86,7 +86,7 @@ For Pair Write#4 and Read #5, there is a `Go` in Write#4’s path, so it pass re
 
 For Pair Write#2 and Write #4, there is a `Go` in Write#4’s path, so it pass reachable check but this pair will be removed in the Step 7.
 
-###Known Limitation
+### Known Limitation
 My approach is not right in some case:
 
 ```go
@@ -109,7 +109,7 @@ Figure #3: Pair(Write #1, Write #2) passes reachable checker but they can’t be
 * Write#1: [Root] =Call=> RaceBar() =Go=> RaceBar$1 => Write#1
 * Write#2: [Root] =Call=> RaceBar() => Write#2
 
-####Todo: Add a new rule:
+#### Todo: Add a new rule:
 let `lastOp` be the last instruction in path that was executed without switch goroutine
 Write#1: [Root] =Call=> RaceBar() =Go=> RaceBar$1 => Write#1
 lastOp_A of Write#1: `GoCall`
@@ -127,19 +127,19 @@ According to The Go Memory Model, we consider
 
 Normal call are also included in set, see Step #7 for reason.
 
-###Definition: Must Happens Before Set of a Path (BeforeSet):
+### Definition: Must Happens Before Set of a Path (BeforeSet):
 For a instruction (target instruction) , Must Happens Before Set contains all synchronization operations that must happen before it. In the basic block this instruction belong to, we include all synchronization operations which is before this instruction. Then we go to this basic block’s parent in dominator tree, include all synchronization operations in this block, until we visit the top basic block of this function.
 
 Then we consider call path from most inner layer to outer layer, for a call edge, we set callsite instruction as the target instruction and collection Must Happens Before Set in caller function, until visit the root node in call graph.
 
-###Definition: Must Happens After Set of a Path (AfterSet):
+### Definition: Must Happens After Set of a Path (AfterSet):
 For a instruction (target instruction), Must Happens After Set contains all synchronization operations that must happen after it. It’s similar with Must Happens Before Set but we collection all synchronization operations after this instruction in it’s basic block and visit it’s parent in post-dominator tree
 
 Then we consider call path from most inner layer to outer layer, for a call edge, we set callsite instruction as the target instruction and collection Must Happens After Set in caller function, until we visit a go-call-edge or visit the root node  in call graph.
 
-###Defer Operations: Before we visited a go-call-edge, we can move defer operations from Must Happens Before Set to Must Happens After Set
+### Defer Operations: Before we visited a go-call-edge, we can move defer operations from Must Happens Before Set to Must Happens After Set
 
-###Known Limitation:
+### Known Limitation:
 It can’t collection synchronization operations in loop and branch
 
 In Case of Write#2 in Fig#2, the this path is:
@@ -178,7 +178,7 @@ func RaceFoo(){
 ```
 Fig#2
 
-###Step #7: Check happen-before relationship from Path_A, Path_B, AfterSet_A BeforeSet_A, AfterSet_B, BeforeSet_B
+### Step #7: Check happen-before relationship from Path_A, Path_B, AfterSet_A BeforeSet_A, AfterSet_B, BeforeSet_B
 
 Pair(A,B) is not race if one of follow are true:
 * A callsite in Path_A exist on AfterSet_B
@@ -219,12 +219,12 @@ Figure #4
 |READ #4	|  -empty-	|  -empty-	|  -empty-	| unrachable 	|
 
 
-###Known Limitation:
+### Known Limitation:
 1. It can’t deal with channel which buffer size is more than one
 2. It assumes the channel is emtpy
 3. It can’t understand transitive of happens before
 
-##Incorrect Case#1:
+## Incorrect Case#1:
 ```go
 func GoAndWait(fn func()) {
   ch := make(chan int)
@@ -246,7 +246,7 @@ func Foo() {
 
 Checker don’t step into function `GoAndWait` to get ch recv into BeforeSet of Write#3, I can add `GoAndWait` to a list to treat it as a normal call for now.
 
-##Incorrect Case#2:
+## Incorrect Case#2:
 ```go
 func Bar() {
   ch1 := make(chan int)
@@ -267,7 +267,7 @@ func Bar() {
 
 It can’t understand transitive of happens before
 
-##Incorrect Case#3:
+## Incorrect Case#3:
 ```go
 func Bar2() {
   ch := make(chan int)
