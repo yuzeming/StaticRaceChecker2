@@ -235,8 +235,8 @@ func main()  {
 	case <-time.After(time.Microsecond):
 		return
 	}
-//	a=3
-//	println(a)
+	a=3
+	println(a)
 }
 `
 	RunTestCase(t, myprog, SimpleResult{}, 0)

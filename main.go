@@ -18,7 +18,7 @@ import (
 )
 
 const _UseTestCase_ = true
-const _debug_print_ = false
+const _debug_print_ = true
 const _ChaCallGraph_ = false
 
 type RecordField struct {
@@ -555,6 +555,13 @@ func GenContextPath(start, end *callgraph.Node) (ret ContextList) {
 	return ret
 }
 
+var BlackFuncList = map[string]bool{
+	"(*testing.T).Run":           true,
+	"(*testing.B).Run":           true,
+	"(*testing.M).Run":           true,
+	"workqueue.ParallelizeUntil": true,
+}
+
 func PathSearch(start, end *callgraph.Node) (ret []*callgraph.Edge) {
 	que := make([]*callgraph.Node, 0, 32)
 	seen := make(map[*callgraph.Node]bool)
@@ -574,10 +581,7 @@ func PathSearch(start, end *callgraph.Node) (ret []*callgraph.Edge) {
 			return ret
 		}
 		for _, e := range n.Out {
-			if fn := e.Callee.Func.String(); !seen[e.Callee] &&
-				fn != "(*testing.T).Run" &&
-				fn != "(*testing.B).Run" &&
-				fn != "(*testing.M).Run" { // don't go into (*testing.T).Run, it's not parallel
+			if fn := e.Callee.Func.String(); !seen[e.Callee] && !BlackFuncList[fn] { // don't go into (*testing.T).Run, it's not parallel
 				seen[e.Callee] = true
 				from[e.Callee] = e
 				que = append(que, e.Callee)
@@ -608,9 +612,12 @@ func GetSyncValue(instr ssa.Instruction, dir int, op1 ssa.Instruction, icase *in
 				ret = append(ret, SyncMutexItem{state.Chan, nil, int(state.Dir), false})
 			}
 		} else {
+			if *icase == -1 {
+				return nil
+			}
 			tmp := *icase
 			*icase = -1
-			return SyncMutexList{SyncMutexItem{ins.States[tmp].Chan, nil, 2, false}} //2 for recv
+			return SyncMutexList{SyncMutexItem{ins.States[tmp].Chan, nil, int(ins.States[tmp].Dir), false}} //2 for recv
 		}
 	case *ssa.UnOp:
 		if ins.Op == token.ARROW {
@@ -619,10 +626,6 @@ func GetSyncValue(instr ssa.Instruction, dir int, op1 ssa.Instruction, icase *in
 	case *ssa.Call:
 		sig := ins.Call.Value.String()
 		switch sig {
-		case "(*sync.Mutex).Lock", "(*sync.RWMutex).Lock", "(*sync.RWMutex).RLock":
-			return SyncMutexList{SyncMutexItem{value: ins.Call.Args[0], deferCall: false, op: 10}} //10 for Lock
-		case "(*sync.Mutex).Unlock", "(*sync.RWMutex).Unlock", "(*sync.RWMutex).RUnlock":
-			return SyncMutexList{SyncMutexItem{value: ins.Call.Args[0], deferCall: false, op: 11}} //11 for Unlock
 		case "(*sync.WaitGroup).Done":
 			return SyncMutexList{SyncMutexItem{ins.Call.Args[0], ins, 20, false}} //20 for Done
 		case "(*sync.WaitGroup).Wait":
@@ -640,16 +643,18 @@ func GetSyncValue(instr ssa.Instruction, dir int, op1 ssa.Instruction, icase *in
 				return CleanDefer(GetAfter(fn.Blocks[0].Instrs[0], op1))
 			}
 			return nil
-		default:
-			return SyncMutexList{SyncMutexItem{nil, ins, 31, false}} //31 for normal call
 		}
+		if (strings.HasPrefix(sig, ").Lock") || strings.HasPrefix(sig, ").RLock")) && len(ins.Call.Args) == 1 {
+			return SyncMutexList{SyncMutexItem{value: ins.Call.Args[0], deferCall: false, op: 10}} //10 for Lock
+		}
+		if (strings.HasPrefix(sig, ").Unlock") || strings.HasPrefix(sig, ").RUnlock")) && len(ins.Call.Args) == 1 {
+			return SyncMutexList{SyncMutexItem{value: ins.Call.Args[0], deferCall: false, op: 11}} //11 for Unlock
+		}
+		return SyncMutexList{SyncMutexItem{nil, ins, 31, false}} //31 for normal call
+
 	case *ssa.Defer:
 		sig := ins.Call.Value.String()
 		switch sig {
-		case "(*sync.Mutex).Lock", "(*sync.RWMutex).Lock", "(*sync.RWMutex).RLock":
-			//panic("Call Lock in defer???")
-		case "(*sync.Mutex).Unlock", "(*sync.RWMutex).Unlock", "(*sync.RWMutex).RUnlock":
-			return SyncMutexList{SyncMutexItem{value: ins.Call.Args[0], deferCall: true, op: 11}} //11 for Unlock
 		case "(*sync.WaitGroup).Done":
 			return SyncMutexList{SyncMutexItem{ins.Call.Args[0], ins, 20, true}} //20 for Done
 		case "(*sync.WaitGroup).Wait":
@@ -668,6 +673,12 @@ func GetSyncValue(instr ssa.Instruction, dir int, op1 ssa.Instruction, icase *in
 			}
 			return nil
 		}
+		if (strings.HasPrefix(sig, ").Lock") || strings.HasPrefix(sig, ").RLock")) && len(ins.Call.Args) == 1 {
+			return SyncMutexList{SyncMutexItem{value: ins.Call.Args[0], deferCall: false, op: 10}} //10 for Lock
+		}
+		if (strings.HasPrefix(sig, ").Unlock") || strings.HasPrefix(sig, ").RUnlock")) && len(ins.Call.Args) == 1 {
+			return SyncMutexList{SyncMutexItem{value: ins.Call.Args[0], deferCall: false, op: 11}} //11 for Unlock
+		}
 	case *ssa.Go:
 		return SyncMutexList{SyncMutexItem{nil, ins, 30, false}} //30 for GoCall
 	default:
@@ -681,7 +692,7 @@ func GetSyncValue(instr ssa.Instruction, dir int, op1 ssa.Instruction, icase *in
 func GetBefore(start ssa.Instruction, op1 ssa.Instruction) (sync SyncMutexList) {
 	bb := start.Block()
 	match := false
-	icase := 0
+	icase := -1
 	for bb != nil {
 		for i := len(bb.Instrs) - 1; i >= 0; i-- {
 			if match {
@@ -693,8 +704,8 @@ func GetBefore(start ssa.Instruction, op1 ssa.Instruction) (sync SyncMutexList) 
 			}
 		}
 		if bb.Comment == "select.body" {
-			bb = bb.Idom()
-			icmp := bb.Instrs[len(bb.Instrs)-2].(*ssa.BinOp)
+			next_block := bb.Preds[0]
+			icmp := next_block.Instrs[len(next_block.Instrs)-2].(*ssa.BinOp)
 			icase = int(icmp.Y.(*ssa.Const).Int64())
 		}
 		bb = bb.Idom()
