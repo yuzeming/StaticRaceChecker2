@@ -241,3 +241,82 @@ func main()  {
 `
 	RunTestCase(t, myprog, SimpleResult{}, 0)
 }
+
+func TestH(t *testing.T) {
+	myprog := `package main
+import "sync"
+
+type Foo struct {
+	sync.RWMutex
+	data int
+}
+
+func main() {
+	foo := &Foo{}
+	go func() {
+		foo.Lock()
+		defer foo.Unlock()
+		foo.data = 1
+	}()
+	foo.RLock()
+	println(foo.data)
+	foo.RUnlock()
+}
+`
+	RunTestCase(t, myprog, SimpleResult{}, 0)
+}
+
+func TestH2(t *testing.T) {
+	myprog := `package main
+import "sync"
+
+type Foo struct {
+	mu sync.RWMutex
+	data int
+}
+
+func main() {
+	foo := &Foo{}
+	go func() {
+		foo.mu.Lock()
+		defer foo.mu.Unlock()
+		foo.data = 1
+	}()
+	foo.mu.RLock()
+	println(foo.data)
+	foo.mu.RUnlock()
+}
+`
+	RunTestCase(t, myprog, SimpleResult{}, 0)
+}
+
+func TestArrayRange(t *testing.T) {
+	myprog := `package main
+func main(){
+	var badCases =[]int{1,2,3,4,5,6,7,8,9}
+	for k := range badCases {
+		go func() {
+			println(k, badCases[k])
+		}()
+	}
+
+	for _, v := range badCases {
+		go func() {
+			println(v)
+		}()
+	}
+
+	for k, v := range badCases {
+		go func() {
+			println(k, v)
+		}()
+	}
+}
+`
+	RunTestCase(t, myprog, SimpleResult{
+		297: {{297, 299}},
+		303: {{303, 305}},
+		309: {{309, 311}},
+	}, 294)
+
+}

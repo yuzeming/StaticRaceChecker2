@@ -49,6 +49,9 @@ type CheckerRunner struct {
 	prog *ssa.Program
 	pkgs []*ssa.Package
 
+	//post-dominator tree
+	post_idom map[*ssa.Function]map[*ssa.BasicBlock]*ssa.BasicBlock
+
 	//Result
 	ResultMux sync.Mutex
 	ResultSet map[ssa.Value][]*Result
@@ -252,7 +255,10 @@ func (r *CheckerRunner) RacePairsAnalyzerRun() {
 		}
 	}
 
-	const MX = 1
+	MX := 64
+	if _debug_print_ {
+		MX = 1
+	}
 	ch := make(chan int, MX)
 
 	for _, x := range r.ReachablePairSet {
@@ -644,10 +650,10 @@ func GetSyncValue(instr ssa.Instruction, dir int, op1 ssa.Instruction, icase *in
 			}
 			return nil
 		}
-		if (strings.HasPrefix(sig, ").Lock") || strings.HasPrefix(sig, ").RLock")) && len(ins.Call.Args) == 1 {
+		if (strings.HasSuffix(sig, ").Lock") || strings.HasSuffix(sig, ").RLock")) && len(ins.Call.Args) == 1 {
 			return SyncMutexList{SyncMutexItem{value: ins.Call.Args[0], deferCall: false, op: 10}} //10 for Lock
 		}
-		if (strings.HasPrefix(sig, ").Unlock") || strings.HasPrefix(sig, ").RUnlock")) && len(ins.Call.Args) == 1 {
+		if (strings.HasSuffix(sig, ").Unlock") || strings.HasSuffix(sig, ").RUnlock")) && len(ins.Call.Args) == 1 {
 			return SyncMutexList{SyncMutexItem{value: ins.Call.Args[0], deferCall: false, op: 11}} //11 for Unlock
 		}
 		return SyncMutexList{SyncMutexItem{nil, ins, 31, false}} //31 for normal call
@@ -673,11 +679,11 @@ func GetSyncValue(instr ssa.Instruction, dir int, op1 ssa.Instruction, icase *in
 			}
 			return nil
 		}
-		if (strings.HasPrefix(sig, ").Lock") || strings.HasPrefix(sig, ").RLock")) && len(ins.Call.Args) == 1 {
-			return SyncMutexList{SyncMutexItem{value: ins.Call.Args[0], deferCall: false, op: 10}} //10 for Lock
+		if (strings.HasSuffix(sig, ").Lock") || strings.HasSuffix(sig, ").RLock")) && len(ins.Call.Args) == 1 {
+			return SyncMutexList{SyncMutexItem{value: ins.Call.Args[0], deferCall: true, op: 10}} //10 for Lock
 		}
-		if (strings.HasPrefix(sig, ").Unlock") || strings.HasPrefix(sig, ").RUnlock")) && len(ins.Call.Args) == 1 {
-			return SyncMutexList{SyncMutexItem{value: ins.Call.Args[0], deferCall: false, op: 11}} //11 for Unlock
+		if (strings.HasSuffix(sig, ").Unlock") || strings.HasSuffix(sig, ").RUnlock")) && len(ins.Call.Args) == 1 {
+			return SyncMutexList{SyncMutexItem{value: ins.Call.Args[0], deferCall: true, op: 11}} //11 for Unlock
 		}
 	case *ssa.Go:
 		return SyncMutexList{SyncMutexItem{nil, ins, 30, false}} //30 for GoCall
@@ -955,7 +961,9 @@ func (r *CheckerRunner) CheckHappendBefore(prog *ssa.Program, cg *callgraph.Grap
 
 	lastOp1, lastOp2 := GetLastOp(ctx1, ctx2)
 	if !CheckReachableInstr(lastOp1, lastOp2) && !CheckReachableInstr(lastOp2, lastOp1) {
-		println("Reason: lastOp")
+		if _debug_print_ {
+			println("Reason: lastOp")
+		}
 		return
 	}
 
@@ -982,18 +990,18 @@ func (r *CheckerRunner) CheckHappendBefore(prog *ssa.Program, cg *callgraph.Grap
 
 	flag := false
 	elem := GetValue(field[0].value).Type().Underlying()
-	switch p := elem.(type) {
+	for p, ok := elem.(*types.Pointer); ok; p, ok = elem.(*types.Pointer) {
+		elem = p.Elem()
+	}
+	switch elem.(type) {
 	case *types.Slice:
 		flag = true
-	case *types.Pointer:
-		switch p.Elem().(type) {
-		case *types.Slice:
-			flag = true
-		case *types.Basic:
-			flag = true
-		case *types.Struct:
-			flag = true
-		}
+	case *types.Basic:
+		flag = true
+	case *types.Named:
+		flag = true
+	case *types.Struct:
+		flag = true
 	}
 
 	if flag && r.hasSameLock(set1[0], set2[0]) {
