@@ -43,9 +43,9 @@ func (s PairList) Less(i, j int) bool { return s[i].x < s[j].x || s[i].x == s[j]
 
 func SortPairMap(sr *SimpleResult) {
 	for k, v := range *sr {
-		for _, tmp := range v {
-			if tmp.x > tmp.y {
-				tmp.x, tmp.y = tmp.y, tmp.x
+		for i := range v {
+			if v[i].x > v[i].y {
+				v[i].x, v[i].y = v[i].y, v[i].x
 			}
 		}
 		sort.Sort(v)
@@ -53,19 +53,19 @@ func SortPairMap(sr *SimpleResult) {
 	}
 }
 
-func CmpResult(t *testing.T, runner *CheckerRunner, expected SimpleResult) {
+func CmpResult(t *testing.T, runner *CheckerRunner, expected SimpleResult, zero int) {
 	recv := make(SimpleResult)
 	for k, v := range runner.ResultSet {
 		key := runner.prog.Fset.Position(k.Pos()).Line
 		var vu PairList
 		for _, c := range v {
 			tmp := PairInt{
-				runner.prog.Fset.Position(c.field[0].ins.Pos()).Line,
-				runner.prog.Fset.Position(c.field[1].ins.Pos()).Line,
+				runner.prog.Fset.Position(c.field[0].ins.Pos()).Line + zero,
+				runner.prog.Fset.Position(c.field[1].ins.Pos()).Line + zero,
 			}
 			vu = append(vu, tmp)
 		}
-		recv[key] = vu
+		recv[key+zero] = vu
 	}
 	SortPairMap(&recv)
 	SortPairMap(&expected)
@@ -88,14 +88,18 @@ func CmpResult(t *testing.T, runner *CheckerRunner, expected SimpleResult) {
 	}
 }
 
-func RunTestCase(t *testing.T, myprog string, except SimpleResult) {
+func RunTestCase(t *testing.T, myprog string, except SimpleResult, firstlineno int) {
 	prog, pkgs := GetProgAndPkgs(t, myprog)
 	r := &CheckerRunner{prog: prog, pkgs: pkgs}
 	r.RacePairsAnalyzerRun()
 
-	r.PrintResult()
+	//r.PrintResult()
 
-	CmpResult(t, r, except)
+	CmpResult(t, r, except, firstlineno-1)
+
+	if t.Failed() {
+		r.PrintResult()
+	}
 }
 
 func TestA(t *testing.T) {
@@ -113,7 +117,8 @@ func TestA(t *testing.T) {
 `
 	RunTestCase(t, myprog, SimpleResult{
 		3: {{5, 8}, {5, 10}, {8, 10}}, // LineNo of Alloc, [ReadA, WriteA,...]
-	})
+	}, 1)
+
 }
 
 func TestB(t *testing.T) {
@@ -132,7 +137,7 @@ func RaceBar(){
 	}
 }
 `
-	RunTestCase(t, myprog, SimpleResult{})
+	RunTestCase(t, myprog, SimpleResult{}, 1)
 }
 
 func TestC(t *testing.T) {
@@ -161,6 +166,78 @@ func main() {
 }
 `
 	RunTestCase(t, myprog, SimpleResult{
-		11: {{16, 18}}, // LineNo of Alloc, [ReadA, WriteA,...]
-	})
+		149: {{154, 156}}, // LineNo of Alloc, [ReadA, WriteA,...]
+	}, 139)
+}
+
+func TestD(t *testing.T) {
+	myprog := `package main
+import "os"
+func RaceBar(){
+	a:=1
+	if len(os.Args)==1 {
+		go func() {
+			a = 2
+			print(a)
+		}()
+	} else {
+		a = 3
+		print(a)
+	}
+}
+`
+	RunTestCase(t, myprog, SimpleResult{}, 0)
+}
+
+func TestE(t *testing.T) {
+	myprog := `package main
+func ForLoop()  {
+	for i:=1;i<=100;i++ {
+		go func() {
+			println(i)
+		}()
+	}
+}
+`
+	RunTestCase(t, myprog, SimpleResult{
+		190: {{190, 192}}, // LineNo of Alloc, [ReadA, WriteA,...]
+	}, 188)
+}
+
+func TestF(t *testing.T) {
+	myprog := `package main
+func ForLoop()  {
+	a := 1
+	go func() {
+		a = 2
+	}()
+	println(a)
+}
+`
+	RunTestCase(t, myprog, SimpleResult{
+		206: {{208, 210}}, // LineNo of Alloc, [ReadA, WriteA,...]
+	}, 204)
+}
+
+func TestG(t *testing.T) {
+	myprog := `package main
+import "time"
+func main()  {
+	ch := make(chan int)
+	a:=1
+	go func() {
+		a=2
+		ch <- 1
+	}()
+	select {
+	case <-ch:
+		println(a)
+	case <-time.After(time.Microsecond):
+		return
+	}
+//	a=3
+//	println(a)
+}
+`
+	RunTestCase(t, myprog, SimpleResult{}, 0)
 }

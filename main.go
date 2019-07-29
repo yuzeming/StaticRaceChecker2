@@ -17,10 +17,8 @@ import (
 	"sync"
 )
 
-const _debug_print_ = true
-const _ReqOneInAnnoFunc_ = true
-const _ReqFastSame_ = true
 const _UseTestCase_ = true
+const _debug_print_ = false
 const _ChaCallGraph_ = false
 
 type RecordField struct {
@@ -31,18 +29,47 @@ type RecordField struct {
 	isAtomic bool
 }
 
-var FastFreeVarMap = make(map[*ssa.FreeVar]ssa.Value)
-
-func AddFreeVarMap(a *ssa.FreeVar, b ssa.Value) {
-	FastFreeVarMap[a] = b
+type Result struct {
+	field [2]RecordField
+	ctx   [2]ContextList
 }
 
-func LockupFreeVar(a *ssa.FreeVar) (ret ssa.Value) {
-	ret = FastFreeVarMap[a]
+type CheckerRunner struct {
+	//temp info
+	RecordSet_Field  []RecordField
+	RecordSet_Array  []RecordField
+	RecordSet_Basic  []RecordField
+	RecordSet_Map    []RecordField
+	PairSet          [][2]RecordField
+	ReachablePairSet [][2]RecordField
+
+	FastFreeVarMap map[*ssa.FreeVar]ssa.Value
+
+	//input
+	prog *ssa.Program
+	pkgs []*ssa.Package
+
+	//Result
+	ResultMux sync.Mutex
+	ResultSet map[ssa.Value][]*Result
+}
+
+func (r *CheckerRunner) AddFreeVarMap(a *ssa.FreeVar, b ssa.Value) {
+	if r.FastFreeVarMap == nil {
+		r.FastFreeVarMap = make(map[*ssa.FreeVar]ssa.Value)
+	}
+	r.FastFreeVarMap[a] = b
+}
+
+func (r *CheckerRunner) LockupFreeVar(a *ssa.FreeVar) (ret ssa.Value) {
+	if r.FastFreeVarMap == nil {
+		r.FastFreeVarMap = make(map[*ssa.FreeVar]ssa.Value)
+	}
+	ret = r.FastFreeVarMap[a]
 	for ret != nil {
 		a2, isFreeVal := ret.(*ssa.FreeVar)
 		if isFreeVal {
-			ret2, ok := FastFreeVarMap[a2]
+			ret2, ok := r.FastFreeVarMap[a2]
 			if ok {
 				ret = ret2
 			} else {
@@ -65,39 +92,16 @@ func GetValue(a ssa.Value) ssa.Value {
 	return a
 }
 
-func FastSame(a ssa.Value, b ssa.Value) bool {
+func (r *CheckerRunner) FastSame(a ssa.Value, b ssa.Value) bool {
 	a = GetValue(a)
 	b = GetValue(b)
 	if fa, isok := a.(*ssa.FreeVar); isok {
-		a = LockupFreeVar(fa)
+		a = r.LockupFreeVar(fa)
 	}
 	if fb, isok := b.(*ssa.FreeVar); isok {
-		b = LockupFreeVar(fb)
+		b = r.LockupFreeVar(fb)
 	}
 	return a == b || reflect.DeepEqual(a, b)
-}
-
-type Result struct {
-	field [2]RecordField
-	ctx   [2]ContextList
-}
-
-type CheckerRunner struct {
-	//temp info
-	RecordSet_Field  []RecordField
-	RecordSet_Array  []RecordField
-	RecordSet_Basic  []RecordField
-	RecordSet_Map    []RecordField
-	PairSet          [][2]RecordField
-	ReachablePairSet [][2]RecordField
-
-	//input
-	prog *ssa.Program
-	pkgs []*ssa.Package
-
-	//Result
-	ResultMux sync.Mutex
-	ResultSet map[ssa.Value][]*Result
 }
 
 func GetAnnoFunctionList(fn *ssa.Function) (anfn []*ssa.Function) {
@@ -108,9 +112,9 @@ func GetAnnoFunctionList(fn *ssa.Function) (anfn []*ssa.Function) {
 	return anfn
 }
 
-func (runner *CheckerRunner) RacePairsAnalyzerRun() {
-	prog := runner.prog
-	pkgs := runner.pkgs
+func (r *CheckerRunner) RacePairsAnalyzerRun() {
+	prog := r.prog
+	pkgs := r.pkgs
 	var mainpkgs []*ssa.Package
 	for _, pkg := range pkgs {
 		if pkg != nil {
@@ -153,7 +157,7 @@ func (runner *CheckerRunner) RacePairsAnalyzerRun() {
 
 	for fn := range FuncsList {
 		if fn.Blocks != nil && fn.Pkg != nil && pkgset[fn.Pkg] && fn.Name() != "init" {
-			runner.runFunc1(fn)
+			r.runFunc1(fn)
 		}
 
 		if pkgset[fn.Pkg] && callGraph.Nodes[fn] == nil && fn.Parent() == nil {
@@ -188,34 +192,34 @@ func (runner *CheckerRunner) RacePairsAnalyzerRun() {
 
 	if _debug_print_ {
 		println("Field")
-		for i, r := range runner.RecordSet_Field {
+		for i, r := range r.RecordSet_Field {
 			println(i, toString(prog, r.ins))
 		}
 
 		println("Array")
-		for i, r := range runner.RecordSet_Array {
+		for i, r := range r.RecordSet_Array {
 			println(i, toString(prog, r.ins), r.ins.String(), r.value.String(), r.isWrite)
 		}
 
 		println("Basic")
-		for i, r := range runner.RecordSet_Basic {
+		for i, r := range r.RecordSet_Basic {
 			println(i, toString(prog, r.ins), r.ins.String(), r.value.String(), r.isWrite)
 		}
 
 		println("Map")
-		for i, r := range runner.RecordSet_Map {
+		for i, r := range r.RecordSet_Map {
 			println(i, toString(prog, r.ins), r.ins.String(), r.value.String(), r.isWrite)
 		}
 	}
 
-	runner.PairSet = append(runner.PairSet, GenPair(runner.RecordSet_Field)...)
-	runner.PairSet = append(runner.PairSet, GenPair(runner.RecordSet_Array)...)
-	runner.PairSet = append(runner.PairSet, GenPair(runner.RecordSet_Basic)...)
-	runner.PairSet = append(runner.PairSet, GenPair(runner.RecordSet_Map)...)
+	r.PairSet = append(r.PairSet, r.GenPair(r.RecordSet_Field)...)
+	r.PairSet = append(r.PairSet, r.GenPair(r.RecordSet_Array)...)
+	r.PairSet = append(r.PairSet, r.GenPair(r.RecordSet_Basic)...)
+	r.PairSet = append(r.PairSet, r.GenPair(r.RecordSet_Map)...)
 
 	if _debug_print_ {
 		println("PairSet")
-		for i, r := range runner.PairSet {
+		for i, r := range r.PairSet {
 			println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
 		}
 	}
@@ -235,15 +239,15 @@ func (runner *CheckerRunner) RacePairsAnalyzerRun() {
 		}
 	}
 
-	for _, r := range runner.PairSet {
-		if CheckReachablePair(callGraph, r) {
-			runner.ReachablePairSet = append(runner.ReachablePairSet, r)
+	for _, x := range r.PairSet {
+		if CheckReachablePair(callGraph, x) {
+			r.ReachablePairSet = append(r.ReachablePairSet, x)
 		}
 	}
 
 	if _debug_print_ {
 		println("Reachable Pair")
-		for i, r := range runner.ReachablePairSet {
+		for i, r := range r.ReachablePairSet {
 			println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
 		}
 	}
@@ -251,11 +255,11 @@ func (runner *CheckerRunner) RacePairsAnalyzerRun() {
 	const MX = 1
 	ch := make(chan int, MX)
 
-	for _, r := range runner.ReachablePairSet {
-		r1 := r
+	for _, x := range r.ReachablePairSet {
+		r1 := x
 		ch <- 1
 		go func() {
-			runner.CheckHappendBefore(prog, callGraph, r1)
+			r.CheckHappendBefore(prog, callGraph, r1)
 			<-ch
 		}()
 	}
@@ -273,7 +277,7 @@ func hasPos(ins ssa.Instruction) bool {
 	return ins.Pos() != token.NoPos
 }
 
-func GenPair(RecordSet []RecordField) (ret [][2]RecordField) {
+func (r *CheckerRunner) GenPair(RecordSet []RecordField) (ret [][2]RecordField) {
 	for i := range RecordSet {
 		if pi := RecordSet[i]; pi.isWrite {
 			for j := range RecordSet {
@@ -282,9 +286,9 @@ func GenPair(RecordSet []RecordField) (ret [][2]RecordField) {
 						pi.Field == pj.Field &&
 						pi.ins.Block() != pj.ins.Block() &&
 						(!pi.isAtomic || !pj.isAtomic) &&
-						(!_ReqOneInAnnoFunc_ || isInAnnoFunc(pi.ins) || isInAnnoFunc(pj.ins)) &&
-						(!_ReqFastSame_ || FastSame(pi.value, pj.value)) &&
-						hasPos(pi.ins) && hasPos((pj.ins)) {
+						(isInAnnoFunc(pi.ins) || isInAnnoFunc(pj.ins)) &&
+						r.FastSame(pi.value, pj.value) &&
+						hasPos(pi.ins) && hasPos(pj.ins) {
 						ret = append(ret, [2]RecordField{pi, pj})
 					}
 				}
@@ -352,23 +356,23 @@ func toString(prog *ssa.Program, op ssa.Instruction) string {
 	return (*prog.Fset).Position((op).Pos()).String()
 }
 
-func toStringValue(prog *ssa.Program, val *ssa.Value) string {
-	return (*prog.Fset).Position((*val).Pos()).String()
+func toStringValue(prog *ssa.Program, val ssa.Value) string {
+	return (*prog.Fset).Position(val.Pos()).String()
 }
 
-func (runner *CheckerRunner) analysisInstrs(instrs ssa.Instruction) {
+func (r *CheckerRunner) analysisInstrs(instrs ssa.Instruction) {
 	switch ins := instrs.(type) {
 	case *ssa.FieldAddr:
 		ref := *ins.Referrers()
 		for i := range ref {
 			tmp := RecordField{ref[i], ins.X, ins.Field, isWrite(ref[i], ins), false}
-			runner.RecordSet_Field = append(runner.RecordSet_Field, tmp)
+			r.RecordSet_Field = append(r.RecordSet_Field, tmp)
 		}
 	case *ssa.IndexAddr:
 		ref := *ins.Referrers()
 		for i := range ref {
 			tmp := RecordField{ref[i], ins.X, 0, isWrite(ref[i], ins), false}
-			runner.RecordSet_Array = append(runner.RecordSet_Array, tmp)
+			r.RecordSet_Array = append(r.RecordSet_Array, tmp)
 		}
 	case *ssa.Alloc:
 		elem := ins.Type().Underlying().(*types.Pointer).Elem()
@@ -379,34 +383,34 @@ func (runner *CheckerRunner) analysisInstrs(instrs ssa.Instruction) {
 					continue // for atomic call
 				}
 				tmp := RecordField{ref[i], ins, 0, isWrite(ref[i], ins), false}
-				runner.RecordSet_Basic = append(runner.RecordSet_Basic, tmp)
+				r.RecordSet_Basic = append(r.RecordSet_Basic, tmp)
 			}
 		}
 		if _, ok := elem.(*types.Array); ok && ins.Heap {
 			ref := *ins.Referrers()
 			for i := range ref {
 				tmp := RecordField{ref[i], ins, 0, isWrite(ref[i], ins), false}
-				runner.RecordSet_Array = append(runner.RecordSet_Array, tmp)
+				r.RecordSet_Array = append(r.RecordSet_Array, tmp)
 			}
 		}
 		if _, ok := elem.(*types.Struct); ok && ins.Heap {
 			ref := *ins.Referrers()
 			for i := range ref {
 				tmp := RecordField{ref[i], ins, 0, isWrite(ref[i], ins), false}
-				runner.RecordSet_Field = append(runner.RecordSet_Field, tmp)
+				r.RecordSet_Field = append(r.RecordSet_Field, tmp)
 			}
 		}
 		if _, ok := elem.(*types.Map); ok && ins.Heap {
 			ref := *ins.Referrers()
 			for i := range ref {
 				tmp := RecordField{ref[i], ins, 0, isWrite(ref[i], ins), false}
-				runner.RecordSet_Map = append(runner.RecordSet_Map, tmp)
+				r.RecordSet_Map = append(r.RecordSet_Map, tmp)
 			}
 		}
 	case *ssa.MakeClosure:
 		freevar := ins.Fn.(*ssa.Function).FreeVars
 		for i := range ins.Bindings {
-			AddFreeVarMap(freevar[i], ins.Bindings[i])
+			r.AddFreeVarMap(freevar[i], ins.Bindings[i])
 		}
 	case *ssa.Call:
 		fn := ins.Call.Value.String()
@@ -416,78 +420,78 @@ func (runner *CheckerRunner) analysisInstrs(instrs ssa.Instruction) {
 			case "AddInt32", "AddInt64", "AddUint32", "AddUint64", "AddUintptr":
 				//func AddInt64(addr *int64, delta int64) (new int64)
 				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, true}
-				runner.RecordSet_Basic = append(runner.RecordSet_Basic, tmp)
+				r.RecordSet_Basic = append(r.RecordSet_Basic, tmp)
 				tmp2 := RecordField{instrs, ins.Call.Args[1], 0, false, false}
-				runner.RecordSet_Basic = append(runner.RecordSet_Basic, tmp2)
+				r.RecordSet_Basic = append(r.RecordSet_Basic, tmp2)
 			case "CompareAndSwapInt32", "CompareAndSwapInt64", "CompareAndSwapPointer", "CompareAndSwapUint32", "CompareAndSwapUint64", "CompareAndSwapUintptr":
 				//func CompareAndSwapInt32(addr *int32, old, new int32) (swapped bool)
 				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, true}
-				runner.RecordSet_Basic = append(runner.RecordSet_Basic, tmp)
+				r.RecordSet_Basic = append(r.RecordSet_Basic, tmp)
 				tmp2 := RecordField{instrs, ins.Call.Args[1], 0, false, true}
-				runner.RecordSet_Basic = append(runner.RecordSet_Basic, tmp2)
+				r.RecordSet_Basic = append(r.RecordSet_Basic, tmp2)
 			case "LoadInt32", "LoadInt64", "LoadPointer", "LoadUint32", "LoadUint64", "LoadUintptr":
 				tmp := RecordField{instrs, ins.Call.Args[0], 0, false, true}
-				runner.RecordSet_Basic = append(runner.RecordSet_Basic, tmp)
+				r.RecordSet_Basic = append(r.RecordSet_Basic, tmp)
 			case "StoreInt32", "StoreInt64", "StorePointer", "StoreUint32", "StoreUint64", "StoreUintptr":
 				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, true}
-				runner.RecordSet_Basic = append(runner.RecordSet_Basic, tmp)
+				r.RecordSet_Basic = append(r.RecordSet_Basic, tmp)
 				tmp2 := RecordField{instrs, ins.Call.Args[1], 0, false, false}
-				runner.RecordSet_Basic = append(runner.RecordSet_Basic, tmp2)
+				r.RecordSet_Basic = append(r.RecordSet_Basic, tmp2)
 			case "SwapPointer", "SwapUint32", "SwapUint64", "SwapUintptr":
 				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, true}
-				runner.RecordSet_Basic = append(runner.RecordSet_Basic, tmp)
+				r.RecordSet_Basic = append(r.RecordSet_Basic, tmp)
 				tmp2 := RecordField{instrs, ins.Call.Args[1], 0, true, true}
-				runner.RecordSet_Basic = append(runner.RecordSet_Basic, tmp2)
+				r.RecordSet_Basic = append(r.RecordSet_Basic, tmp2)
 			}
 		} else {
 			switch fn {
 			case "builtin delete": // map delete
 				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, false}
-				runner.RecordSet_Map = append(runner.RecordSet_Map, tmp)
+				r.RecordSet_Map = append(r.RecordSet_Map, tmp)
 			case "builtin append":
 				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, false}
-				runner.RecordSet_Array = append(runner.RecordSet_Array, tmp)
+				r.RecordSet_Array = append(r.RecordSet_Array, tmp)
 				switch ins.Call.Args[1].Type().(type) {
 				case *types.Basic:
 					tmp2 := RecordField{instrs, ins.Call.Args[1], 0, false, false}
-					runner.RecordSet_Basic = append(runner.RecordSet_Basic, tmp2)
+					r.RecordSet_Basic = append(r.RecordSet_Basic, tmp2)
 				default:
 					tmp2 := RecordField{instrs, ins.Call.Args[1], 0, false, false}
-					runner.RecordSet_Array = append(runner.RecordSet_Array, tmp2)
+					r.RecordSet_Array = append(r.RecordSet_Array, tmp2)
 				}
 			case "builtin len":
 				tmp := RecordField{instrs, ins.Call.Args[0], 0, false, false}
-				runner.RecordSet_Array = append(runner.RecordSet_Array, tmp)
+				r.RecordSet_Array = append(r.RecordSet_Array, tmp)
 			case "(*os.File).Write", "(*os.File).Read":
 				tmp2 := RecordField{instrs, ins.Call.Args[1], 0, fn == "(*os.File).Write", false}
-				runner.RecordSet_Array = append(runner.RecordSet_Array, tmp2)
+				r.RecordSet_Array = append(r.RecordSet_Array, tmp2)
 				fallthrough
 			case "(*os.File).Close":
 				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, false}
-				runner.RecordSet_Basic = append(runner.RecordSet_Basic, tmp)
+				r.RecordSet_Basic = append(r.RecordSet_Basic, tmp)
 			}
 		}
 
 	case *ssa.MapUpdate:
 		tmp := RecordField{instrs, ins.Map, 0, true, false}
-		runner.RecordSet_Map = append(runner.RecordSet_Map, tmp)
+		r.RecordSet_Map = append(r.RecordSet_Map, tmp)
 	case *ssa.Lookup:
 		tmp := RecordField{instrs, ins.X, 0, false, false}
-		runner.RecordSet_Map = append(runner.RecordSet_Map, tmp)
+		r.RecordSet_Map = append(r.RecordSet_Map, tmp)
 	default:
 	}
 }
 
-func (runner *CheckerRunner) visitBasicBlock(fnname string, bb *ssa.BasicBlock) {
+func (r *CheckerRunner) visitBasicBlock(fnname string, bb *ssa.BasicBlock) {
 	for i := range bb.Instrs {
-		runner.analysisInstrs(bb.Instrs[i])
+		r.analysisInstrs(bb.Instrs[i])
 	}
 	for _, bb := range bb.Dominees() {
-		runner.visitBasicBlock(fnname, bb)
+		r.visitBasicBlock(fnname, bb)
 	}
 }
 
-func (runner *CheckerRunner) runFunc1(fn *ssa.Function) {
+func (r *CheckerRunner) runFunc1(fn *ssa.Function) {
 	fnname := fn.Name()
 	if strings.HasPrefix(fnname, "Benchmark") {
 		return
@@ -495,7 +499,7 @@ func (runner *CheckerRunner) runFunc1(fn *ssa.Function) {
 	if _debug_print_ {
 		println("runFunc1", fnname, fn)
 	}
-	runner.visitBasicBlock(fnname, fn.Blocks[0])
+	r.visitBasicBlock(fnname, fn.Blocks[0])
 
 	for _, freevar := range fn.FreeVars {
 		ref := *freevar.Referrers()
@@ -512,19 +516,19 @@ func (runner *CheckerRunner) runFunc1(fn *ssa.Function) {
 				elem := freevar.Type().Underlying().(*types.Pointer).Elem()
 				if _, ok := elem.(*types.Basic); ok {
 					tmp := RecordField{ref[i], freevar, 0, isWrite(ref[i], freevar), false}
-					runner.RecordSet_Basic = append(runner.RecordSet_Basic, tmp)
+					r.RecordSet_Basic = append(r.RecordSet_Basic, tmp)
 				}
 				if _, ok := elem.(*types.Array); ok {
 					tmp := RecordField{ref[i], freevar, 0, isWrite(ref[i], freevar), false}
-					runner.RecordSet_Array = append(runner.RecordSet_Array, tmp)
+					r.RecordSet_Array = append(r.RecordSet_Array, tmp)
 				}
 				if _, ok := elem.(*types.Struct); ok {
 					tmp := RecordField{ref[i], freevar, 0, isWrite(ref[i], freevar), false}
-					runner.RecordSet_Field = append(runner.RecordSet_Field, tmp)
+					r.RecordSet_Field = append(r.RecordSet_Field, tmp)
 				}
 				if _, ok := elem.(*types.Map); ok {
 					tmp := RecordField{ref[i], freevar, 0, isWrite(ref[i], freevar), false}
-					runner.RecordSet_Map = append(runner.RecordSet_Map, tmp)
+					r.RecordSet_Map = append(r.RecordSet_Map, tmp)
 				}
 			}
 		}
@@ -534,7 +538,7 @@ func (runner *CheckerRunner) runFunc1(fn *ssa.Function) {
 type ContextList []ssa.Instruction
 type SyncMutexItem struct {
 	value     ssa.Value
-	gocall    *ssa.CallCommon
+	inst      ssa.Instruction
 	op        int
 	deferCall bool
 }
@@ -579,7 +583,6 @@ func PathSearch(start, end *callgraph.Node) (ret []*callgraph.Edge) {
 				que = append(que, e.Callee)
 			}
 		}
-
 	}
 	return
 }
@@ -591,17 +594,23 @@ func CleanDefer(x SyncMutexList) (ret SyncMutexList) {
 	return x
 }
 
-func GetSyncValue(instr *ssa.Instruction, dir int) (ret SyncMutexList) {
-	switch ins := (*instr).(type) {
+func GetSyncValue(instr ssa.Instruction, dir int, op1 ssa.Instruction, icase *int) (ret SyncMutexList) {
+	switch ins := instr.(type) {
 	case *ssa.Send:
 		return SyncMutexList{SyncMutexItem{value: ins.Chan, deferCall: false, op: 1}} //1 for send
 	case *ssa.Select:
-		if !ins.Blocking {
+		if !ins.Blocking && dir == 1 {
 			return nil
 		}
 		ret = nil
-		for _, state := range ins.States {
-			ret = append(ret, SyncMutexItem{state.Chan, nil, int(state.Dir), false})
+		if dir == 1 {
+			for _, state := range ins.States {
+				ret = append(ret, SyncMutexItem{state.Chan, nil, int(state.Dir), false})
+			}
+		} else {
+			tmp := *icase
+			*icase = -1
+			return SyncMutexList{SyncMutexItem{ins.States[tmp].Chan, nil, 2, false}} //2 for recv
 		}
 	case *ssa.UnOp:
 		if ins.Op == token.ARROW {
@@ -615,24 +624,24 @@ func GetSyncValue(instr *ssa.Instruction, dir int) (ret SyncMutexList) {
 		case "(*sync.Mutex).Unlock", "(*sync.RWMutex).Unlock", "(*sync.RWMutex).RUnlock":
 			return SyncMutexList{SyncMutexItem{value: ins.Call.Args[0], deferCall: false, op: 11}} //11 for Unlock
 		case "(*sync.WaitGroup).Done":
-			return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 20, false}} //20 for Done
+			return SyncMutexList{SyncMutexItem{ins.Call.Args[0], ins, 20, false}} //20 for Done
 		case "(*sync.WaitGroup).Wait":
-			return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 21, false}} //21 for Wait
+			return SyncMutexList{SyncMutexItem{ins.Call.Args[0], ins, 21, false}} //21 for Wait
 		case "builtin close":
 			if _, ischen := ins.Call.Args[0].Type().(*types.Chan); ischen {
-				return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 3, false}} //3 for close chan
+				return SyncMutexList{SyncMutexItem{ins.Call.Args[0], ins, 3, false}} //3 for close chan
 			}
 		case "(*golang.org/x/sync/errgroup.Group).Wait":
 			fn, ok := ins.Call.Value.(*ssa.Function)
 			if dir == 1 && ok {
-				return CleanDefer(GetBefore(fn.Blocks[0].Instrs[0]))
+				return CleanDefer(GetBefore(fn.Blocks[0].Instrs[0], op1))
 			}
 			if dir == -1 && ok {
-				return CleanDefer(GetAfter(fn.Blocks[0].Instrs[0]))
+				return CleanDefer(GetAfter(fn.Blocks[0].Instrs[0], op1))
 			}
 			return nil
 		default:
-			return SyncMutexList{SyncMutexItem{nil, &ins.Call, 31, false}} //31 for normal call
+			return SyncMutexList{SyncMutexItem{nil, ins, 31, false}} //31 for normal call
 		}
 	case *ssa.Defer:
 		sig := ins.Call.Value.String()
@@ -642,49 +651,58 @@ func GetSyncValue(instr *ssa.Instruction, dir int) (ret SyncMutexList) {
 		case "(*sync.Mutex).Unlock", "(*sync.RWMutex).Unlock", "(*sync.RWMutex).RUnlock":
 			return SyncMutexList{SyncMutexItem{value: ins.Call.Args[0], deferCall: true, op: 11}} //11 for Unlock
 		case "(*sync.WaitGroup).Done":
-			return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 20, true}} //20 for Done
+			return SyncMutexList{SyncMutexItem{ins.Call.Args[0], ins, 20, true}} //20 for Done
 		case "(*sync.WaitGroup).Wait":
-			return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 21, true}} //21 for Wait
+			return SyncMutexList{SyncMutexItem{ins.Call.Args[0], ins, 21, true}} //21 for Wait
 		case "builtin close":
 			if _, ischen := ins.Call.Args[0].Type().(*types.Chan); ischen {
-				return SyncMutexList{SyncMutexItem{ins.Call.Args[0], &ins.Call, 3, true}} //3 for close chan
+				return SyncMutexList{SyncMutexItem{ins.Call.Args[0], ins, 3, true}} //3 for close chan
 			}
 		case "(*golang.org/x/sync/errgroup.Group).Wait":
 			fn, ok := ins.Call.Value.(*ssa.Function)
 			if dir == 1 && ok {
-				return CleanDefer(GetBefore(fn.Blocks[0].Instrs[0]))
+				return CleanDefer(GetBefore(fn.Blocks[0].Instrs[0], op1))
 			}
 			if dir == -1 && ok {
-				return CleanDefer(GetAfter(fn.Blocks[0].Instrs[0]))
+				return CleanDefer(GetAfter(fn.Blocks[0].Instrs[0], op1))
 			}
 			return nil
 		}
 	case *ssa.Go:
-		return SyncMutexList{SyncMutexItem{nil, &ins.Call, 30, false}} //30 for GoCall
+		return SyncMutexList{SyncMutexItem{nil, ins, 30, false}} //30 for GoCall
+	default:
+		if reflect.DeepEqual(op1, instr) {
+			return SyncMutexList{SyncMutexItem{nil, ins, 40, false}} // 40 for just match in set
+		}
 	}
 	return nil
 }
 
-func GetBefore(start ssa.Instruction) (sync SyncMutexList) {
+func GetBefore(start ssa.Instruction, op1 ssa.Instruction) (sync SyncMutexList) {
 	bb := start.Block()
 	match := false
-
+	icase := 0
 	for bb != nil {
 		for i := len(bb.Instrs) - 1; i >= 0; i-- {
 			if match {
-				if tmp := GetSyncValue(&bb.Instrs[i], -1); tmp != nil {
+				if tmp := GetSyncValue(bb.Instrs[i], -1, op1, &icase); tmp != nil {
 					sync = append(sync, tmp...)
 				}
 			} else {
 				match = reflect.DeepEqual(bb.Instrs[i], start)
 			}
 		}
+		if bb.Comment == "select.body" {
+			bb = bb.Idom()
+			icmp := bb.Instrs[len(bb.Instrs)-2].(*ssa.BinOp)
+			icase = int(icmp.Y.(*ssa.Const).Int64())
+		}
 		bb = bb.Idom()
 	}
 	return sync
 }
 
-func GetAfter(start ssa.Instruction) (sync SyncMutexList) {
+func GetAfter(start ssa.Instruction, op ssa.Instruction) (sync SyncMutexList) {
 	bb := start.Block()
 	match := false
 
@@ -696,7 +714,8 @@ func GetAfter(start ssa.Instruction) (sync SyncMutexList) {
 		bb = que[i]
 		for i := range bb.Instrs {
 			if match {
-				if tmp := GetSyncValue(&bb.Instrs[i], 1); tmp != nil {
+				icase := -1
+				if tmp := GetSyncValue(bb.Instrs[i], 1, op, &icase); tmp != nil {
 					sync = append(sync, tmp...)
 				}
 			} else {
@@ -724,12 +743,12 @@ func FilterDefer(buf SyncMutexList) (bf, af SyncMutexList) {
 	return bf, af
 }
 
-func GetBeforeAfertSet(cl ContextList) [2]SyncMutexList {
+func GetBeforeAfertSet(cl ContextList, op1 ssa.Instruction) [2]SyncMutexList {
 	seenGo := false
 	var BeforeSet, AfterSet SyncMutexList
 	for j := len(cl) - 1; j >= 0; j-- {
 		ins := cl[j]
-		tmp := GetBefore(ins)
+		tmp := GetBefore(ins, op1)
 		if _, isGo := ins.(*ssa.Go); seenGo || isGo {
 			seenGo = true
 		}
@@ -737,7 +756,7 @@ func GetBeforeAfertSet(cl ContextList) [2]SyncMutexList {
 		BeforeSet = append(BeforeSet, bf...)
 		if !seenGo {
 			AfterSet = append(AfterSet, af...)
-			AfterSet = append(AfterSet, GetAfter(ins)...)
+			AfterSet = append(AfterSet, GetAfter(ins, op1)...)
 		}
 	}
 	return [2]SyncMutexList{BeforeSet, AfterSet}
@@ -781,30 +800,29 @@ func FindGoCallInAfterSet(ctx1 ContextList, afterSet SyncMutexList) bool {
 	for _, call := range ctx1 {
 		if _, isgo := call.(*ssa.Go); isgo {
 			for _, item := range afterSet {
-				if item.gocall != nil && item.gocall.Pos() == call.Pos() {
+				if item.inst != nil && item.inst.Pos() == call.Pos() {
 					return true
 				}
 			}
 		}
 		if _, iscall := call.(*ssa.Call); iscall {
 			for _, item := range afterSet {
-				if item.gocall != nil && item.gocall.Pos() == call.Pos() {
+				if item.inst != nil && item.inst.Pos() == call.Pos() {
 					return true
 				}
 			}
 		}
-
 	}
 	return false
 }
 
 // item_B Happens before or sync with item_A
-func HappensBeforeFromSet(beforeList SyncMutexList, afterList SyncMutexList) bool {
+func (r *CheckerRunner) HappensBeforeFromSet(beforeList SyncMutexList, afterList SyncMutexList) bool {
 	//Find Chan
 	for _, itemB := range beforeList {
 		if itemB.op < 10 { // is a chan
 			for _, itemA := range afterList {
-				if itemA.op < 10 && itemA.op != itemB.op && FastSame(itemA.value, itemB.value) {
+				if itemA.op < 10 && itemA.op != itemB.op && r.FastSame(itemA.value, itemB.value) {
 					return true
 				}
 			}
@@ -815,7 +833,7 @@ func HappensBeforeFromSet(beforeList SyncMutexList, afterList SyncMutexList) boo
 	for _, itemB := range beforeList {
 		if itemB.op == 21 { // is a Wg.Wait
 			for _, itemA := range afterList {
-				if itemA.op == 20 && FastSame(itemA.value, itemB.value) { // is a Wg.Done
+				if itemA.op == 20 && r.FastSame(itemA.value, itemB.value) { // is a Wg.Done
 					return true
 				}
 			}
@@ -831,19 +849,19 @@ func PrintCtx(prog *ssa.Program, ctx ContextList) {
 	}
 }
 
-func (runner *CheckerRunner) ReportRaceWithCtx(prog *ssa.Program, field [2]RecordField, ctx [2]ContextList) {
-	runner.ResultMux.Lock()
-	defer runner.ResultMux.Unlock()
+func (r *CheckerRunner) ReportRaceWithCtx(prog *ssa.Program, field [2]RecordField, ctx [2]ContextList) {
+	r.ResultMux.Lock()
+	defer r.ResultMux.Unlock()
 
-	if runner.ResultSet == nil {
-		runner.ResultSet = make(map[ssa.Value][]*Result)
+	if r.ResultSet == nil {
+		r.ResultSet = make(map[ssa.Value][]*Result)
 	}
 
 	val := GetValue(field[0].value)
 	if freeval, ok := val.(*ssa.FreeVar); ok {
-		val = LockupFreeVar(freeval)
+		val = r.LockupFreeVar(freeval)
 	}
-	runner.ResultSet[val] = append(runner.ResultSet[val], &Result{field: field, ctx: ctx})
+	r.ResultSet[val] = append(r.ResultSet[val], &Result{field: field, ctx: ctx})
 }
 
 func hasGoCall(ctx ContextList) bool {
@@ -875,12 +893,12 @@ func CalcMutexMap(set SyncMutexList) (ret map[ssa.Value]int) {
 	return ret
 }
 
-func hasSameLock(set1, set2 SyncMutexList) bool {
+func (r *CheckerRunner) hasSameLock(set1, set2 SyncMutexList) bool {
 	Map1 := CalcMutexMap(set1)
 	Map2 := CalcMutexMap(set2)
 	for k1, v1 := range Map1 {
 		for k2, v2 := range Map2 {
-			if v1 > 0 && v2 > 0 && FastSame(k1, k2) {
+			if v1 > 0 && v2 > 0 && r.FastSame(k1, k2) {
 				return true
 			}
 		}
@@ -888,16 +906,27 @@ func hasSameLock(set1, set2 SyncMutexList) bool {
 	return false
 }
 
-func GetLastOp(ctx ContextList) ssa.Instruction {
-	for i := 0; i < len(ctx); i++ {
-		if _, ok := ctx[i].(*ssa.Go); ok {
-			return ctx[i]
+func GetLastOp(ctx1, ctx2 ContextList) (a, b ssa.Instruction) {
+	p1, p2 := 0, 0
+	for p1 < len(ctx1) && p2 < len(ctx2) {
+		fn := ctx1[p1].Parent()
+		for p1+1 < len(ctx1) && ctx1[p1+1].Parent() == fn {
+			p1++
+		}
+		for p2+1 < len(ctx2) && ctx2[p2+1].Parent() == fn {
+			p2++
+		}
+		if p1+1 < len(ctx1) && p2+1 < len(ctx2) && ctx1[p1+1].Parent() == ctx2[p2+1].Parent() {
+			p1++
+			p2++
+		} else {
+			break
 		}
 	}
-	return ctx[len(ctx)-1]
+	return ctx1[p1], ctx2[p2]
 }
 
-func (runner *CheckerRunner) CheckHappendBefore(prog *ssa.Program, cg *callgraph.Graph, field [2]RecordField) {
+func (r *CheckerRunner) CheckHappendBefore(prog *ssa.Program, cg *callgraph.Graph, field [2]RecordField) {
 	node1 := cg.Nodes[field[0].ins.Parent()]
 	node2 := cg.Nodes[field[1].ins.Parent()]
 
@@ -913,8 +942,14 @@ func (runner *CheckerRunner) CheckHappendBefore(prog *ssa.Program, cg *callgraph
 	ctx1 := append(GenContextPath(startpoint, node1), field[0].ins)
 	ctx2 := append(GenContextPath(startpoint, node2), field[1].ins)
 
-	set1 := GetBeforeAfertSet(ctx1)
-	set2 := GetBeforeAfertSet(ctx2)
+	lastOp1, lastOp2 := GetLastOp(ctx1, ctx2)
+	if !CheckReachableInstr(lastOp1, lastOp2) && !CheckReachableInstr(lastOp2, lastOp1) {
+		println("Reason: lastOp")
+		return
+	}
+
+	set1 := GetBeforeAfertSet(ctx1, field[1].ins)
+	set2 := GetBeforeAfertSet(ctx2, field[0].ins)
 
 	if len(ctx1) == len(ctx2) {
 		isSame := true
@@ -950,42 +985,52 @@ func (runner *CheckerRunner) CheckHappendBefore(prog *ssa.Program, cg *callgraph
 		}
 	}
 
-	if flag && hasSameLock(set1[0], set2[0]) {
-		println("Reason: Same Clock")
+	if flag && r.hasSameLock(set1[0], set2[0]) {
+		if _debug_print_ {
+			println("Reason: Same Clock")
+		}
 		return
 	}
 
 	if FindGoCallInAfterSet(ctx1, set2[1]) {
-		println("Reason: FindGoCallInAfterSet1")
+		if _debug_print_ {
+			println("Reason: FindGoCallInAfterSet1")
+		}
 		return
 	}
 
 	if FindGoCallInAfterSet(ctx2, set1[1]) {
-		println("Reason: FindGoCallInAfterSet2")
+		if _debug_print_ {
+			println("Reason: FindGoCallInAfterSet2")
+		}
 		return
 	}
 
-	if HappensBeforeFromSet(set1[0], set2[1]) {
-		println("Reason: HappensBeforeFromSet1")
+	if r.HappensBeforeFromSet(set1[0], set2[1]) {
+		if _debug_print_ {
+			println("Reason: HappensBeforeFromSet1")
+		}
 		return
 	}
-	if HappensBeforeFromSet(set2[0], set1[1]) {
-		println("Reason: HappensBeforeFromSet2")
+	if r.HappensBeforeFromSet(set2[0], set1[1]) {
+		if _debug_print_ {
+			println("Reason: HappensBeforeFromSet2")
+		}
 		return
 	}
 
-	runner.ReportRaceWithCtx(prog, field, [2]ContextList{ctx1, ctx2})
+	r.ReportRaceWithCtx(prog, field, [2]ContextList{ctx1, ctx2})
 }
 
-func (runner *CheckerRunner) PrintResult() {
-	for k, v := range runner.ResultSet {
-		fmt.Println("Race Found:[ZZZ]", toStringValue(runner.prog, &k), k.String())
+func (r *CheckerRunner) PrintResult() {
+	for k, v := range r.ResultSet {
+		fmt.Println("Race Found:[ZZZ]", toStringValue(r.prog, k), k.String())
 		for _, c := range v {
-			fmt.Println(toString(runner.prog, c.field[0].ins), "Func:", c.field[0].ins.Parent().Name())
-			PrintCtx(runner.prog, c.ctx[0])
+			fmt.Println(toString(r.prog, c.field[0].ins), "Func:", c.field[0].ins.Parent().Name())
+			PrintCtx(r.prog, c.ctx[0])
 			fmt.Println("------------")
-			fmt.Println(toString(runner.prog, c.field[1].ins), "Func:", c.field[1].ins.Parent().Name())
-			PrintCtx(runner.prog, c.ctx[1])
+			fmt.Println(toString(r.prog, c.field[1].ins), "Func:", c.field[1].ins.Parent().Name())
+			PrintCtx(r.prog, c.ctx[1])
 			fmt.Println("============")
 		}
 	}
@@ -1042,5 +1087,4 @@ func main() {
 
 	runner.RacePairsAnalyzerRun()
 	runner.PrintResult()
-
 }
