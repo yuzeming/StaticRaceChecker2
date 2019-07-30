@@ -647,30 +647,23 @@ func main() {
 
 func TestSelectChan(t *testing.T) {
 	myprog := `package main
-import "sync"
-
 func main() {
-	var a []int
-	ch := make(chan int, 1)
+	a := 1
+	ch := make(chan int)
 	go func() {
-		for i := 1; i <= 1000; i++ {
-			mu.Lock()
-			a = append(a, i)
-			mu.Unlock()
-		}
+		a = 2
 		ch <- 1
 	}()
-
-	for i := 1; i <= 1000; i++ {
-		mu.Lock()
-		a = append(a, -i)
-		mu.Unlock()
+	select {
+	case <-ch:
+		println(a)
+	default:
+		//println(a + 1)
+		return
 	}
+	println(a)
 
-	<-ch
-	println(len(a))
 }
-
 `
 	RunTestCase(t, myprog, SimpleResult{}, 0)
 }
