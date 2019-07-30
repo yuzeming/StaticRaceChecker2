@@ -18,7 +18,7 @@ import (
 )
 
 const _UseTestCase_ = true
-const _debug_print_ = true
+const _debug_print_ = false
 const _ChaCallGraph_ = false
 
 type RecordField struct {
@@ -604,7 +604,7 @@ func CleanDefer(x SyncMutexList) (ret SyncMutexList) {
 	return x
 }
 
-func GetSyncValue(instr ssa.Instruction, dir int, op1 ssa.Instruction, icase *int) (ret SyncMutexList) {
+func (r *CheckerRunner) GetSyncValue(instr ssa.Instruction, dir int, op1 ssa.Instruction, icase *int) (ret SyncMutexList) {
 	switch ins := instr.(type) {
 	case *ssa.Send:
 		return SyncMutexList{SyncMutexItem{value: ins.Chan, deferCall: false, op: 1}} //1 for send
@@ -643,10 +643,10 @@ func GetSyncValue(instr ssa.Instruction, dir int, op1 ssa.Instruction, icase *in
 		case "(*golang.org/x/sync/errgroup.Group).Wait":
 			fn, ok := ins.Call.Value.(*ssa.Function)
 			if dir == 1 && ok {
-				return CleanDefer(GetBefore(fn.Blocks[0].Instrs[0], op1))
+				return CleanDefer(r.GetBefore(fn.Blocks[0].Instrs[0], op1))
 			}
 			if dir == -1 && ok {
-				return CleanDefer(GetAfter(fn.Blocks[0].Instrs[0], op1))
+				return CleanDefer(r.GetAfter(fn.Blocks[0].Instrs[0], op1))
 			}
 			return nil
 		}
@@ -672,10 +672,10 @@ func GetSyncValue(instr ssa.Instruction, dir int, op1 ssa.Instruction, icase *in
 		case "(*golang.org/x/sync/errgroup.Group).Wait":
 			fn, ok := ins.Call.Value.(*ssa.Function)
 			if dir == 1 && ok {
-				return CleanDefer(GetBefore(fn.Blocks[0].Instrs[0], op1))
+				return CleanDefer(r.GetBefore(fn.Blocks[0].Instrs[0], op1))
 			}
 			if dir == -1 && ok {
-				return CleanDefer(GetAfter(fn.Blocks[0].Instrs[0], op1))
+				return CleanDefer(r.GetAfter(fn.Blocks[0].Instrs[0], op1))
 			}
 			return nil
 		}
@@ -695,14 +695,14 @@ func GetSyncValue(instr ssa.Instruction, dir int, op1 ssa.Instruction, icase *in
 	return nil
 }
 
-func GetBefore(start ssa.Instruction, op1 ssa.Instruction) (sync SyncMutexList) {
+func (r *CheckerRunner) GetBefore(start ssa.Instruction, op1 ssa.Instruction) (sync SyncMutexList) {
 	bb := start.Block()
 	match := false
 	icase := -1
 	for bb != nil {
 		for i := len(bb.Instrs) - 1; i >= 0; i-- {
 			if match {
-				if tmp := GetSyncValue(bb.Instrs[i], -1, op1, &icase); tmp != nil {
+				if tmp := r.GetSyncValue(bb.Instrs[i], -1, op1, &icase); tmp != nil {
 					sync = append(sync, tmp...)
 				}
 			} else {
@@ -719,7 +719,7 @@ func GetBefore(start ssa.Instruction, op1 ssa.Instruction) (sync SyncMutexList) 
 	return sync
 }
 
-func GetAfter(start ssa.Instruction, op ssa.Instruction) (sync SyncMutexList) {
+func (r *CheckerRunner) GetAfter(start ssa.Instruction, op ssa.Instruction) (sync SyncMutexList) {
 	bb := start.Block()
 	match := false
 
@@ -732,7 +732,7 @@ func GetAfter(start ssa.Instruction, op ssa.Instruction) (sync SyncMutexList) {
 		for i := range bb.Instrs {
 			if match {
 				icase := -1
-				if tmp := GetSyncValue(bb.Instrs[i], 1, op, &icase); tmp != nil {
+				if tmp := r.GetSyncValue(bb.Instrs[i], 1, op, &icase); tmp != nil {
 					sync = append(sync, tmp...)
 				}
 			} else {
@@ -760,12 +760,12 @@ func FilterDefer(buf SyncMutexList) (bf, af SyncMutexList) {
 	return bf, af
 }
 
-func GetBeforeAfertSet(cl ContextList, op1 ssa.Instruction) [2]SyncMutexList {
+func (r *CheckerRunner) GetBeforeAfertSet(cl ContextList, op1 ssa.Instruction) [2]SyncMutexList {
 	seenGo := false
 	var BeforeSet, AfterSet SyncMutexList
 	for j := len(cl) - 1; j >= 0; j-- {
 		ins := cl[j]
-		tmp := GetBefore(ins, op1)
+		tmp := r.GetBefore(ins, op1)
 		if _, isGo := ins.(*ssa.Go); seenGo || isGo {
 			seenGo = true
 		}
@@ -773,7 +773,7 @@ func GetBeforeAfertSet(cl ContextList, op1 ssa.Instruction) [2]SyncMutexList {
 		BeforeSet = append(BeforeSet, bf...)
 		if !seenGo {
 			AfterSet = append(AfterSet, af...)
-			AfterSet = append(AfterSet, GetAfter(ins, op1)...)
+			AfterSet = append(AfterSet, r.GetAfter(ins, op1)...)
 		}
 	}
 	return [2]SyncMutexList{BeforeSet, AfterSet}
@@ -813,18 +813,28 @@ func CheckReachableInstr(start, end ssa.Instruction) bool {
 	return false
 }
 
-func FindGoCallInAfterSet(ctx1 ContextList, afterSet SyncMutexList) bool {
+func isCopyToHeap(call, ins ssa.Instruction) bool {
+	if ins2, ok := ins.(*ssa.Store); ok {
+		addr := GetValue(ins2.Addr)
+		if addr2, ok2 := addr.(*ssa.Alloc); ok2 {
+			return CheckReachableInstr(call, addr2)
+		}
+	}
+	return false
+}
+
+func FindGoCallInAfterSet(ctx1 ContextList, afterSet SyncMutexList, instr2 ssa.Instruction) bool {
 	for _, call := range ctx1 {
 		if _, isgo := call.(*ssa.Go); isgo {
 			for _, item := range afterSet {
-				if item.inst != nil && item.inst.Pos() == call.Pos() {
+				if item.inst != nil && item.inst.Pos() == call.Pos() && (isCopyToHeap(call, instr2) || !CheckReachableInstr(call, instr2)) {
 					return true
 				}
 			}
 		}
 		if _, iscall := call.(*ssa.Call); iscall {
 			for _, item := range afterSet {
-				if item.inst != nil && item.inst.Pos() == call.Pos() {
+				if item.inst != nil && item.inst.Pos() == call.Pos() && (isCopyToHeap(call, instr2) || !CheckReachableInstr(call, instr2)) {
 					return true
 				}
 			}
@@ -894,7 +904,7 @@ func CalcMutexMap(set SyncMutexList) (ret map[ssa.Value]int) {
 	ret = make(map[ssa.Value]int)
 	for _, item := range set {
 		if item.op == 10 || item.op == 11 {
-			value := item.value
+			value := GetValue(item.value)
 			//println(value)
 			if _, ok := ret[value]; !ok {
 				ret[value] = 0
@@ -967,8 +977,8 @@ func (r *CheckerRunner) CheckHappendBefore(prog *ssa.Program, cg *callgraph.Grap
 		return
 	}
 
-	set1 := GetBeforeAfertSet(ctx1, field[1].ins)
-	set2 := GetBeforeAfertSet(ctx2, field[0].ins)
+	set1 := r.GetBeforeAfertSet(ctx1, field[1].ins)
+	set2 := r.GetBeforeAfertSet(ctx2, field[0].ins)
 
 	if len(ctx1) == len(ctx2) {
 		isSame := true
@@ -1011,14 +1021,14 @@ func (r *CheckerRunner) CheckHappendBefore(prog *ssa.Program, cg *callgraph.Grap
 		return
 	}
 
-	if FindGoCallInAfterSet(ctx1, set2[1]) {
+	if FindGoCallInAfterSet(ctx1, set2[1], field[1].ins) {
 		if _debug_print_ {
 			println("Reason: FindGoCallInAfterSet1")
 		}
 		return
 	}
 
-	if FindGoCallInAfterSet(ctx2, set1[1]) {
+	if FindGoCallInAfterSet(ctx2, set1[1], field[0].ins) {
 		if _debug_print_ {
 			println("Reason: FindGoCallInAfterSet2")
 		}

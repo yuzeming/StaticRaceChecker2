@@ -290,6 +290,32 @@ func main() {
 	RunTestCase(t, myprog, SimpleResult{}, 0)
 }
 
+func TestH3(t *testing.T) {
+	myprog := `package main
+import "sync"
+
+type Foo struct {
+	mu sync.RWMutex
+	data int
+}
+
+func main() {
+	foo := &Foo{}
+	go func() {
+		foo.mu.Lock()
+		foo.mu.Unlock()
+		foo.data = 1
+	}()
+	foo.mu.RLock()
+	println(foo.data)
+	foo.mu.RUnlock()
+}
+`
+	RunTestCase(t, myprog, SimpleResult{
+		303: {{307, 310}},
+	}, 294)
+}
+
 func TestArrayRange(t *testing.T) {
 	myprog := `package main
 func main(){
@@ -299,24 +325,352 @@ func main(){
 			println(k, badCases[k])
 		}()
 	}
-
+	
 	for _, v := range badCases {
 		go func() {
 			println(v)
 		}()
 	}
-
+	
 	for k, v := range badCases {
 		go func() {
 			println(k, v)
 		}()
 	}
+	
+	for k := range badCases {
+		k2:=k
+		go func() {
+			println(k2, badCases[k2])
+		}()
+	}
+	
+	for _, v := range badCases {
+		v2 := v
+		go func() {
+			println(v2)
+		}()
+	}
+	
+	for k, v := range badCases {
+		k2, v2 := k ,v
+		go func() {
+			println(k2, v2)
+		}()
+	}
 }
 `
 	RunTestCase(t, myprog, SimpleResult{
-		297: {{297, 299}},
+		297: {{297, 299}, {297, 299}},
 		303: {{303, 305}},
 		309: {{309, 311}},
 	}, 294)
 
+}
+
+func TestWaitGroup(t *testing.T) {
+	myprog := `package main
+import "sync"
+func main(){
+	a := 1
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		a = 2
+	}()
+	wg.Wait()
+	println(a)
+}
+`
+	RunTestCase(t, myprog, SimpleResult{}, 0)
+
+}
+
+func TestWaitGroup2(t *testing.T) {
+	myprog := `package main
+import (
+	"sync"
+	"fmt"
+)
+
+func main(){
+	wg := sync.WaitGroup{}
+	for i := 17; i <= 21; i++ { // write
+		a := i
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			apiVersion := fmt.Sprintf("v1.%d", i) // read
+			println(apiVersion)
+			println(a)
+		}()
+	}
+	wg.Wait()
+}
+`
+	RunTestCase(t, myprog, SimpleResult{
+		399: {{399, 404}},
+	}, 391)
+
+}
+
+func TestFile(t *testing.T) {
+	myprog := `package main
+import "os"
+func RaceFileClose()  {
+	f, _ := os.OpenFile("notes.txt", os.O_RDWR|os.O_CREATE, 0755)
+	go func() {
+		f.Close()
+	}()
+
+	bytes := make([]byte, 10)
+	n,_ := f.Read(bytes)
+	println(n,bytes)
+}
+`
+	RunTestCase(t, myprog, SimpleResult{
+		418: {{420, 424}},
+	}, 415)
+}
+
+func TestRaceRutrunValue(t *testing.T) {
+	myprog := `package main
+func aaaaa() (ret int,
+		retstr string){
+	ret = 2
+	retstr ="aaaaa"
+	go func() {
+		ret = 1
+		retstr = "bbbbb"
+	}()
+	//println(ret,retstr)
+	return ret,retstr
+}
+`
+	RunTestCase(t, myprog, SimpleResult{
+		435: {{440, 444}, {440, 444}}, //duplicate result
+		436: {{441, 444}, {441, 444}},
+	}, 434)
+
+}
+
+func TestRaceHttpMux(t *testing.T) {
+	myprog := `package main
+
+import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+)
+
+func main() {
+	visitcount := 0
+	backendHandler := http.NewServeMux()
+	backendHandler.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
+		visitcount += 1
+		fmt.Fprintf(w, "Welcome to the home page! %d\n", visitcount)
+	})
+
+	backendServer := httptest.NewUnstartedServer(backendHandler)
+	backendServer.Start()
+
+	println(visitcount)
+}
+
+`
+	RunTestCase(t, myprog, SimpleResult{
+		464: {{467, 474}}, //duplicate result
+	}, 455)
+
+}
+
+func TestRaceAtomic(t *testing.T) {
+	myprog := `package main
+
+import (
+	"sync/atomic"
+	"time"
+)
+func main() {
+	const waiters = 10
+	var waited int32
+	for i := 0; i < waiters; i++ {
+		go func() {
+			atomic.AddInt32(&waited, 1)
+		}()
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	if waited != waiters {
+		println("Multiple waiters doesn't work, only %v finished", waited)
+	}
+}
+
+`
+	RunTestCase(t, myprog, SimpleResult{
+		493: {{496, 501}, {496, 502}}, //duplicate result
+	}, 485)
+
+}
+
+func TestRaceAtomic2(t *testing.T) {
+	myprog := `package main
+
+import (
+	"sync/atomic"
+	"time"
+)
+func RaceAtomic2() {
+	const waiters = 10
+	var waited int32
+	for i := 0; i < waiters; i++ {
+		go func() {
+			atomic.AddInt32(&waited, 1)
+		}()
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	waited2 := atomic.LoadInt32(&waited)
+	if waited2 != waiters {
+		println("Multiple waiters doesn't work, only %v finished", waited2)
+	}
+}
+
+`
+	RunTestCase(t, myprog, SimpleResult{}, 0)
+}
+
+func TestRaceArrayAppend(t *testing.T) {
+	myprog := `package main
+import "sync"
+func main() {
+	var got []int
+	var wg sync.WaitGroup
+	for i := 1; i <= 10; i++ {
+		wg.Add(1)
+		go func(start int) {
+			for j := start + 1; j <= start+100; j++ {
+				got = append(got, j)
+			}
+		}(i * 1000)
+	}
+	println(len(got))
+	for i := range got {
+		println(got[i])
+	}
+}
+
+`
+	RunTestCase(t, myprog, SimpleResult{
+		548: {{554, 560}, {554, 558}},
+	}, 545)
+}
+
+func TestRaceArrayAppend2(t *testing.T) {
+	myprog := `package main
+func RaceAppend() {
+	a := []int{1,2,3,4,5}
+
+	go func() {
+		a = append(a,100)
+	}()
+	a[0] =1
+
+	for i:=range a {
+		println(a[i])
+	}
+}
+`
+	RunTestCase(t, myprog, SimpleResult{
+		573: {{576, 578}, {576, 581}},
+	}, 571)
+}
+
+func TestRaceerrGroup(t *testing.T) {
+	myprog := `package main
+import "golang.org/x/sync/errgroup" 
+type Bar struct {
+	lst []int
+}
+func main() {
+	bar := Bar{}
+	var g errgroup.Group
+	g.Go(func() error {
+		bar.lst=append(bar.lst, 1)
+		return nil
+	})
+	a := []int{1,2,3,4,5}
+	a = append(a,bar.lst...)
+	// Wait for all HTTP fetches to complete.
+	if err := g.Wait(); err == nil {
+		println("Successfully fetched all URLs.")
+	}
+}
+`
+	RunTestCase(t, myprog, SimpleResult{
+		597: {{604, 600}, {604, 600}},
+	}, 591)
+}
+
+func TestAppendMutex(t *testing.T) {
+	myprog := `package main
+
+import "sync"
+
+func main() {
+	var a []int
+	var mu sync.Mutex
+	ch := make(chan int, 1)
+	go func() {
+		for i := 1; i <= 1000; i++ {
+			mu.Lock()
+			a = append(a, i)
+			mu.Unlock()
+		}
+		ch <- 1
+	}()
+
+	for i := 1; i <= 1000; i++ {
+		mu.Lock()
+		a = append(a, -i)
+		mu.Unlock()
+	}
+
+	<-ch
+	println(len(a))
+}
+
+`
+	RunTestCase(t, myprog, SimpleResult{}, 0)
+}
+
+func TestSelectChan(t *testing.T) {
+	myprog := `package main
+import "sync"
+
+func main() {
+	var a []int
+	ch := make(chan int, 1)
+	go func() {
+		for i := 1; i <= 1000; i++ {
+			mu.Lock()
+			a = append(a, i)
+			mu.Unlock()
+		}
+		ch <- 1
+	}()
+
+	for i := 1; i <= 1000; i++ {
+		mu.Lock()
+		a = append(a, -i)
+		mu.Unlock()
+	}
+
+	<-ch
+	println(len(a))
+}
+
+`
+	RunTestCase(t, myprog, SimpleResult{}, 0)
 }
