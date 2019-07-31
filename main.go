@@ -11,6 +11,7 @@ import (
 	"golang.org/x/tools/go/pointer"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
+	"path"
 	"reflect"
 	"sort"
 	"strings"
@@ -37,6 +38,8 @@ type CheckerRunner struct {
 	chaCallGraph bool
 	detailReport bool
 	printCtx     bool
+	path         string
+	excludePath  string
 
 	//temp info
 	RecordsetField   []RecordField
@@ -115,6 +118,12 @@ func GetAnnoFunctionList(fn *ssa.Function) (anfn []*ssa.Function) {
 	return anfn
 }
 
+func (r *CheckerRunner) CheckPkgPath(fn *ssa.Function) bool {
+	return fn.Blocks != nil && fn.Pkg != nil && fn.Name() != "init" &&
+		strings.HasPrefix(fn.Pkg.Pkg.Path(), r.path) &&
+		!strings.HasPrefix(fn.Pkg.Pkg.Path(), r.excludePath)
+}
+
 func (r *CheckerRunner) RacePairsAnalyzerRun() {
 	prog := r.prog
 	pkgs := r.pkgs
@@ -153,43 +162,38 @@ func (r *CheckerRunner) RacePairsAnalyzerRun() {
 
 	FuncsList := ssautil.AllFunctions(prog)
 
-	pkgset := make(map[*ssa.Package]bool)
-	for _, pkg := range pkgs {
-		pkgset[pkg] = true
-	}
-
 	for fn := range FuncsList {
-		if fn.Blocks != nil && fn.Pkg != nil && pkgset[fn.Pkg] && fn.Name() != "init" {
+		if r.CheckPkgPath(fn) {
 			r.runFunc1(fn)
-		}
 
-		if pkgset[fn.Pkg] && callGraph.Nodes[fn] == nil && fn.Parent() == nil {
-			//println("dead code", fn.String())
-			//Add fake cg node to improve cover
-			annoFnSet := make(map[*ssa.Function]bool)
-			for _, fn := range GetAnnoFunctionList(fn) {
-				annoFnSet[fn] = true
-			}
-
-			//copy nodes
-			for k := range annoFnSet {
-				if callGraph.Nodes[k] == nil {
-					callGraph.CreateNode(k)
+			if callGraph.Nodes[fn] == nil && fn.Parent() == nil {
+				//println("dead code", fn.String())
+				//Add fake cg node to improve cover
+				annoFnSet := make(map[*ssa.Function]bool)
+				for _, fn := range GetAnnoFunctionList(fn) {
+					annoFnSet[fn] = true
 				}
-			}
 
-			//copy edges
-			for k := range annoFnSet {
-				node := cg2.Nodes[k]
-				for _, edge := range node.Out {
-					if calleefn := edge.Callee.Func; annoFnSet[calleefn] {
-						callgraph.AddEdge(callGraph.Nodes[k], edge.Site, callGraph.Nodes[calleefn])
+				//copy nodes
+				for k := range annoFnSet {
+					if callGraph.Nodes[k] == nil {
+						callGraph.CreateNode(k)
 					}
 				}
-			}
 
-			//Add A fake edge from node to fn
-			callgraph.AddEdge(callGraph.Root, nil, callGraph.Nodes[fn])
+				//copy edges
+				for k := range annoFnSet {
+					node := cg2.Nodes[k]
+					for _, edge := range node.Out {
+						if calleefn := edge.Callee.Func; annoFnSet[calleefn] {
+							callgraph.AddEdge(callGraph.Nodes[k], edge.Site, callGraph.Nodes[calleefn])
+						}
+					}
+				}
+
+				//Add A fake edge from node to fn
+				callgraph.AddEdge(callGraph.Root, nil, callGraph.Nodes[fn])
+			}
 		}
 	}
 
@@ -314,7 +318,8 @@ func (r *CheckerRunner) GenPair(RecordSet []RecordField) (ret [][2]RecordField) 
 		if pi := RecordSet[i]; pi.isWrite {
 			for j := range RecordSet {
 				if pj := RecordSet[j]; !pj.isWrite || i < j {
-					if reflect.DeepEqual(pi.value.Type(), pj.value.Type()) &&
+					if pi.ins.Parent().Pkg == pj.ins.Parent().Pkg &&
+						reflect.DeepEqual(pi.value.Type(), pj.value.Type()) &&
 						pi.Field == pj.Field &&
 						pi.ins.Block() != pj.ins.Block() &&
 						(!pi.isAtomic || !pj.isAtomic) &&
@@ -1084,7 +1089,7 @@ func (r *CheckerRunner) PrintResult() {
 		v := r.ResultSet[k]
 		fmt.Printf("----------Bug[%d]----------\n", i)
 		fmt.Printf("Type: Data Race \tReason: Two goroutines access the same variable concurrently and at least one of the accesses is a write. \n")
-		fmt.Printf("Variable:%s \tFunction: %s \nPosition:%s\n", k.String(), k.Parent().Name(), toStringValue(r.prog, k))
+		fmt.Printf("Variable: %s \tFunction: %s \nPosition:%s\n", k.String(), k.Parent().Name(), toStringValue(r.prog, k))
 		for j := range v {
 			p1, p2 := v[j].field[0], v[j].field[1]
 			fmt.Printf("Access1: %s @ %s\tAtomic:%t\tWrite:%t\n", p1.ins.String(), toString(r.prog, p1.ins), p1.isAtomic, p1.isWrite)
@@ -1097,7 +1102,7 @@ func (r *CheckerRunner) PrintResult() {
 			}
 			if !r.detailReport {
 				if len(v) > 1 {
-					fmt.Printf("\t and more %d race ...", len(v)-1)
+					fmt.Printf("\t and more %d race ...\n", len(v)-1)
 				}
 				break
 			}
@@ -1123,9 +1128,12 @@ func main() {
 	flag.BoolVar(&runner.chaCallGraph, "p", false, "use cha call graph only [default: false]")
 	flag.BoolVar(&runner.debugPrint, "debug", false, "print debug info to stderr [default: false]")
 	flag.BoolVar(&runner.detailReport, "d", false, "report all race pair [default: false]")
-	flag.BoolVar(&runner.printCtx, "c", false, "report context for race pair [default: false]")
+	flag.BoolVar(&runner.printCtx, "c", false, "report context for every race pair [default: false]")
+	flag.StringVar(&runner.path, "path", "", "Path to package")
+	flag.Parse()
+	runner.excludePath = path.Join(runner.path, "vendor")
 	cfg := packages.Config{Mode: packages.LoadAllSyntax, Tests: runner.useTestCase}
-	initial, err := packages.Load(&cfg, flag.Args()[0])
+	initial, err := packages.Load(&cfg, runner.path)
 	if err != nil {
 		return
 		//log.Fatal(err)
@@ -1140,7 +1148,6 @@ func main() {
 	}
 
 	if runner.useTestCase {
-
 		// For example, when using the go command, loading "fmt" with Tests=true
 		// returns four packages, with IDs "fmt" (the standard package),
 		// "fmt [fmt.test]" (the package as compiled for the test),
@@ -1158,10 +1165,6 @@ func main() {
 
 	// Create SSA packages for well-typed packages and their dependencies.
 	prog, pkgs := ssautil.AllPackages(initial, 0)
-
-	if len(pkgs) > 1000 {
-		return
-	}
 
 	// Build SSA code for the whole program.
 	prog.Build()
