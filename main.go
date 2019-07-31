@@ -20,7 +20,8 @@ import (
 const _UseTestCase_ = true
 const _debug_print_ = false
 const _ChaCallGraph_ = false
-const _detailreport_ = true
+const _detailreport_ = false
+const _print_ctx_ = false
 
 type RecordField struct {
 	ins      ssa.Instruction
@@ -1081,19 +1082,56 @@ func (r *CheckerRunner) CheckHappendBefore(prog *ssa.Program, cg *callgraph.Grap
 	r.ReportRaceWithCtx(prog, field, [2]ContextList{ctx1, ctx2})
 }
 
+type ValueList []ssa.Value
+
+func (s ValueList) Len() int           { return len(s) }
+func (s ValueList) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
+func (s ValueList) Less(i, j int) bool { return s[i].Pos() < s[j].Pos() }
+
 func (r *CheckerRunner) PrintResult() {
-	for k, v := range r.ResultSet {
-		fmt.Println("Race Found:[ZZZ]", toStringValue(r.prog, k), k.String())
-		if _detailreport_ {
-			for _, c := range v {
-				fmt.Println(toString(r.prog, c.field[0].ins), "Func:", c.field[0].ins.Parent().Name())
-				PrintCtx(r.prog, c.ctx[0])
-				fmt.Println("------------")
-				fmt.Println(toString(r.prog, c.field[1].ins), "Func:", c.field[1].ins.Parent().Name())
-				PrintCtx(r.prog, c.ctx[1])
-				fmt.Println("============")
+	r.ResultMux.Lock()
+	defer r.ResultMux.Unlock()
+	var varlist ValueList
+	for k := range r.ResultSet {
+		varlist = append(varlist, k)
+	}
+	sort.Sort(varlist)
+
+	for i := range varlist {
+		k := varlist[i]
+		v := r.ResultSet[k]
+		fmt.Printf("----------Bug[%d]----------\n", i)
+		fmt.Printf("Type: Data Race \tReason: Two goroutines access the same variable concurrently and at least one of the accesses is a write. \n")
+		fmt.Printf("Variable:%s \tFunction: %s \nPosition:%s\n", k.String(), k.Parent().Name(), toStringValue(r.prog, k))
+		for j := range v {
+			p1, p2 := v[j].field[0], v[j].field[1]
+			fmt.Printf("Access1: %s @ %s\tAtomic:%t\tWrite:%t\n", p1.ins.String(), toString(r.prog, p1.ins), p1.isAtomic, p1.isWrite)
+			if _print_ctx_ {
+				PrintCtx(r.prog, v[j].ctx[0])
+			}
+			fmt.Printf("Access2: %s @ %s\tAtomic:%t\tWrite:%t\n", p2.ins.String(), toString(r.prog, p2.ins), p2.isAtomic, p2.isWrite)
+			if _print_ctx_ {
+				PrintCtx(r.prog, v[j].ctx[1])
+			}
+			if !_detailreport_ {
+				if len(v) > 1 {
+					fmt.Printf("\t and more %d race ...", len(v)-1)
+				}
+				break
 			}
 		}
+
+		//fmt.Printf("Race Found:[ZZZ]", toStringValue(r.prog, k), k.String(), k.Parent().Name())
+		//if _detailreport_ {
+		//	for _, c := range v {
+		//		fmt.Println(toString(r.prog, c.field[0].ins), "Func:", c.field[0].ins.Parent().Name())
+		//		PrintCtx(r.prog, c.ctx[0])
+		//		fmt.Println("------------")
+		//		fmt.Println(toString(r.prog, c.field[1].ins), "Func:", c.field[1].ins.Parent().Name())
+		//		PrintCtx(r.prog, c.ctx[1])
+		//		fmt.Println("============")
+		//	}
+		//}
 	}
 }
 
