@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"go/token"
 	"go/types"
@@ -10,18 +11,11 @@ import (
 	"golang.org/x/tools/go/pointer"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
-	"os"
 	"reflect"
 	"sort"
 	"strings"
 	"sync"
 )
-
-const _UseTestCase_ = true
-const _debug_print_ = false
-const _ChaCallGraph_ = false
-const _detailreport_ = false
-const _print_ctx_ = false
 
 type RecordField struct {
 	ins      ssa.Instruction
@@ -37,11 +31,18 @@ type Result struct {
 }
 
 type CheckerRunner struct {
+	// config
+	useTestCase  bool
+	debugPrint   bool
+	chaCallGraph bool
+	detailReport bool
+	printCtx     bool
+
 	//temp info
-	RecordSet_Field  []RecordField
-	RecordSet_Array  []RecordField
-	RecordSet_Basic  []RecordField
-	RecordSet_Map    []RecordField
+	RecordsetField   []RecordField
+	RecordSetArray   []RecordField
+	RecordsetBasic   []RecordField
+	RecordsetMap     []RecordField
 	PairSet          [][2]RecordField
 	ReachablePairSet [][2]RecordField
 
@@ -50,9 +51,6 @@ type CheckerRunner struct {
 	//input
 	prog *ssa.Program
 	pkgs []*ssa.Package
-
-	//post-dominator tree
-	post_idom map[*ssa.Function]map[*ssa.BasicBlock]*ssa.BasicBlock
 
 	//Result
 	ResultMux sync.Mutex
@@ -120,14 +118,14 @@ func GetAnnoFunctionList(fn *ssa.Function) (anfn []*ssa.Function) {
 func (r *CheckerRunner) RacePairsAnalyzerRun() {
 	prog := r.prog
 	pkgs := r.pkgs
-	var mainpkgs []*ssa.Package
+	var mainPkgs []*ssa.Package
 	for _, pkg := range pkgs {
 		if pkg != nil {
 			if pkg.Func("main") != nil {
-				mainpkgs = append(mainpkgs, pkg)
+				mainPkgs = append(mainPkgs, pkg)
 			}
 			if testpkg := prog.CreateTestMainPackage(pkg); testpkg != nil {
-				mainpkgs = append(mainpkgs, testpkg)
+				mainPkgs = append(mainPkgs, testpkg)
 			}
 		}
 	}
@@ -136,12 +134,12 @@ func (r *CheckerRunner) RacePairsAnalyzerRun() {
 
 	cg2 := cha.CallGraph(prog)
 
-	if len(mainpkgs) == 0 || _ChaCallGraph_ {
+	if len(mainPkgs) == 0 || r.chaCallGraph {
 		//println("No Main Package Found")
 		callGraph = cg2
 	} else {
 		config := &pointer.Config{
-			Mains:          mainpkgs,
+			Mains:          mainPkgs,
 			BuildCallGraph: true,
 		}
 		result, err := pointer.Analyze(config)
@@ -195,44 +193,44 @@ func (r *CheckerRunner) RacePairsAnalyzerRun() {
 		}
 	}
 
-	if _debug_print_ {
+	if r.debugPrint {
 		println("Field")
-		for i, r := range r.RecordSet_Field {
+		for i, r := range r.RecordsetField {
 			println(i, toString(prog, r.ins))
 		}
 
 		println("Array")
-		for i, r := range r.RecordSet_Array {
+		for i, r := range r.RecordSetArray {
 			println(i, toString(prog, r.ins), r.ins.String(), r.value.String(), r.isWrite)
 		}
 
 		println("Basic")
-		for i, r := range r.RecordSet_Basic {
+		for i, r := range r.RecordsetBasic {
 			println(i, toString(prog, r.ins), r.ins.String(), r.value.String(), r.isWrite)
 		}
 
 		println("Map")
-		for i, r := range r.RecordSet_Map {
+		for i, r := range r.RecordsetMap {
 			println(i, toString(prog, r.ins), r.ins.String(), r.value.String(), r.isWrite)
 		}
 	}
 
 	var wg sync.WaitGroup
-	var tmp_pair [4][][2]RecordField
-	for i, pair := range [][]RecordField{r.RecordSet_Field, r.RecordSet_Array, r.RecordSet_Basic, r.RecordSet_Map} {
+	var tmpPair [4][][2]RecordField
+	for i, pair := range [][]RecordField{r.RecordsetField, r.RecordSetArray, r.RecordsetBasic, r.RecordsetMap} {
 		wg.Add(1)
 		go func(i int, pair []RecordField) {
-			tmp_pair[i] = r.GenPair(pair)
+			tmpPair[i] = r.GenPair(pair)
 			wg.Done()
 		}(i, pair)
 	}
 	wg.Wait()
 
-	for i := range tmp_pair {
-		r.PairSet = append(r.PairSet, tmp_pair[i]...)
+	for i := range tmpPair {
+		r.PairSet = append(r.PairSet, tmpPair[i]...)
 	}
 
-	if _debug_print_ {
+	if r.debugPrint {
 		println("PairSet")
 		for i, r := range r.PairSet {
 			println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
@@ -255,7 +253,7 @@ func (r *CheckerRunner) RacePairsAnalyzerRun() {
 	}
 
 	MX := 64
-	if _debug_print_ {
+	if r.debugPrint {
 		MX = 1
 	}
 	ch := make(chan int, MX)
@@ -278,7 +276,7 @@ func (r *CheckerRunner) RacePairsAnalyzerRun() {
 		ch <- 1
 	}
 
-	if _debug_print_ {
+	if r.debugPrint {
 		println("Reachable Pair")
 		for i, r := range r.ReachablePairSet {
 			println(i, toString(prog, r[0].ins), "\n", toString(prog, r[1].ins))
@@ -364,12 +362,12 @@ func CheckReachablePair(cg *callgraph.Graph, field [2]RecordField) bool {
 		now := queue[i]
 		state := seen[now]
 		for _, e := range now.Out {
-			new_state := state
+			newState := state
 			if _, isGo := e.Site.(*ssa.Go); isGo && !BlackFuncList[e.Site.Common().Value.String()] {
-				new_state = 2
+				newState = 2
 			}
-			if seen[e.Callee] < new_state {
-				seen[e.Callee] = new_state
+			if seen[e.Callee] < newState {
+				seen[e.Callee] = newState
 				queue = append(queue, e.Callee)
 			}
 		}
@@ -400,13 +398,13 @@ func (r *CheckerRunner) analysisInstrs(instrs ssa.Instruction) {
 		ref := *ins.Referrers()
 		for i := range ref {
 			tmp := RecordField{ref[i], ins.X, ins.Field, isWrite(ref[i], ins), false}
-			r.RecordSet_Field = append(r.RecordSet_Field, tmp)
+			r.RecordsetField = append(r.RecordsetField, tmp)
 		}
 	case *ssa.IndexAddr:
 		ref := *ins.Referrers()
 		for i := range ref {
 			tmp := RecordField{ref[i], ins.X, 0, isWrite(ref[i], ins), false}
-			r.RecordSet_Array = append(r.RecordSet_Array, tmp)
+			r.RecordSetArray = append(r.RecordSetArray, tmp)
 		}
 	case *ssa.Alloc:
 		elem := ins.Type().Underlying().(*types.Pointer).Elem()
@@ -417,28 +415,28 @@ func (r *CheckerRunner) analysisInstrs(instrs ssa.Instruction) {
 					continue // for atomic call
 				}
 				tmp := RecordField{ref[i], ins, 0, isWrite(ref[i], ins), false}
-				r.RecordSet_Basic = append(r.RecordSet_Basic, tmp)
+				r.RecordsetBasic = append(r.RecordsetBasic, tmp)
 			}
 		}
 		if _, ok := elem.(*types.Array); ok && ins.Heap {
 			ref := *ins.Referrers()
 			for i := range ref {
 				tmp := RecordField{ref[i], ins, 0, isWrite(ref[i], ins), false}
-				r.RecordSet_Array = append(r.RecordSet_Array, tmp)
+				r.RecordSetArray = append(r.RecordSetArray, tmp)
 			}
 		}
 		if _, ok := elem.(*types.Struct); ok && ins.Heap {
 			ref := *ins.Referrers()
 			for i := range ref {
 				tmp := RecordField{ref[i], ins, 0, isWrite(ref[i], ins), false}
-				r.RecordSet_Field = append(r.RecordSet_Field, tmp)
+				r.RecordsetField = append(r.RecordsetField, tmp)
 			}
 		}
 		if _, ok := elem.(*types.Map); ok && ins.Heap {
 			ref := *ins.Referrers()
 			for i := range ref {
 				tmp := RecordField{ref[i], ins, 0, isWrite(ref[i], ins), false}
-				r.RecordSet_Map = append(r.RecordSet_Map, tmp)
+				r.RecordsetMap = append(r.RecordsetMap, tmp)
 			}
 		}
 	case *ssa.MakeClosure:
@@ -454,64 +452,64 @@ func (r *CheckerRunner) analysisInstrs(instrs ssa.Instruction) {
 			case "AddInt32", "AddInt64", "AddUint32", "AddUint64", "AddUintptr":
 				//func AddInt64(addr *int64, delta int64) (new int64)
 				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, true}
-				r.RecordSet_Basic = append(r.RecordSet_Basic, tmp)
+				r.RecordsetBasic = append(r.RecordsetBasic, tmp)
 				tmp2 := RecordField{instrs, ins.Call.Args[1], 0, false, false}
-				r.RecordSet_Basic = append(r.RecordSet_Basic, tmp2)
+				r.RecordsetBasic = append(r.RecordsetBasic, tmp2)
 			case "CompareAndSwapInt32", "CompareAndSwapInt64", "CompareAndSwapPointer", "CompareAndSwapUint32", "CompareAndSwapUint64", "CompareAndSwapUintptr":
 				//func CompareAndSwapInt32(addr *int32, old, new int32) (swapped bool)
 				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, true}
-				r.RecordSet_Basic = append(r.RecordSet_Basic, tmp)
+				r.RecordsetBasic = append(r.RecordsetBasic, tmp)
 				tmp2 := RecordField{instrs, ins.Call.Args[1], 0, false, true}
-				r.RecordSet_Basic = append(r.RecordSet_Basic, tmp2)
+				r.RecordsetBasic = append(r.RecordsetBasic, tmp2)
 			case "LoadInt32", "LoadInt64", "LoadPointer", "LoadUint32", "LoadUint64", "LoadUintptr":
 				tmp := RecordField{instrs, ins.Call.Args[0], 0, false, true}
-				r.RecordSet_Basic = append(r.RecordSet_Basic, tmp)
+				r.RecordsetBasic = append(r.RecordsetBasic, tmp)
 			case "StoreInt32", "StoreInt64", "StorePointer", "StoreUint32", "StoreUint64", "StoreUintptr":
 				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, true}
-				r.RecordSet_Basic = append(r.RecordSet_Basic, tmp)
+				r.RecordsetBasic = append(r.RecordsetBasic, tmp)
 				tmp2 := RecordField{instrs, ins.Call.Args[1], 0, false, false}
-				r.RecordSet_Basic = append(r.RecordSet_Basic, tmp2)
+				r.RecordsetBasic = append(r.RecordsetBasic, tmp2)
 			case "SwapPointer", "SwapUint32", "SwapUint64", "SwapUintptr":
 				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, true}
-				r.RecordSet_Basic = append(r.RecordSet_Basic, tmp)
+				r.RecordsetBasic = append(r.RecordsetBasic, tmp)
 				tmp2 := RecordField{instrs, ins.Call.Args[1], 0, true, true}
-				r.RecordSet_Basic = append(r.RecordSet_Basic, tmp2)
+				r.RecordsetBasic = append(r.RecordsetBasic, tmp2)
 			}
 		} else {
 			switch fn {
 			case "builtin delete": // map delete
 				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, false}
-				r.RecordSet_Map = append(r.RecordSet_Map, tmp)
+				r.RecordsetMap = append(r.RecordsetMap, tmp)
 			case "builtin append":
 				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, false}
-				r.RecordSet_Array = append(r.RecordSet_Array, tmp)
+				r.RecordSetArray = append(r.RecordSetArray, tmp)
 				switch ins.Call.Args[1].Type().(type) {
 				case *types.Basic:
 					tmp2 := RecordField{instrs, ins.Call.Args[1], 0, false, false}
-					r.RecordSet_Basic = append(r.RecordSet_Basic, tmp2)
+					r.RecordsetBasic = append(r.RecordsetBasic, tmp2)
 				default:
 					tmp2 := RecordField{instrs, ins.Call.Args[1], 0, false, false}
-					r.RecordSet_Array = append(r.RecordSet_Array, tmp2)
+					r.RecordSetArray = append(r.RecordSetArray, tmp2)
 				}
 			case "builtin len":
 				tmp := RecordField{instrs, ins.Call.Args[0], 0, false, false}
-				r.RecordSet_Array = append(r.RecordSet_Array, tmp)
+				r.RecordSetArray = append(r.RecordSetArray, tmp)
 			case "(*os.File).Write", "(*os.File).Read":
 				tmp2 := RecordField{instrs, ins.Call.Args[1], 0, fn == "(*os.File).Write", false}
-				r.RecordSet_Array = append(r.RecordSet_Array, tmp2)
+				r.RecordSetArray = append(r.RecordSetArray, tmp2)
 				fallthrough
 			case "(*os.File).Close":
 				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, false}
-				r.RecordSet_Basic = append(r.RecordSet_Basic, tmp)
+				r.RecordsetBasic = append(r.RecordsetBasic, tmp)
 			}
 		}
 
 	case *ssa.MapUpdate:
 		tmp := RecordField{instrs, ins.Map, 0, true, false}
-		r.RecordSet_Map = append(r.RecordSet_Map, tmp)
+		r.RecordsetMap = append(r.RecordsetMap, tmp)
 	case *ssa.Lookup:
 		tmp := RecordField{instrs, ins.X, 0, false, false}
-		r.RecordSet_Map = append(r.RecordSet_Map, tmp)
+		r.RecordsetMap = append(r.RecordsetMap, tmp)
 	default:
 	}
 }
@@ -530,7 +528,7 @@ func (r *CheckerRunner) runFunc1(fn *ssa.Function) {
 	if strings.HasPrefix(fnname, "Benchmark") {
 		return
 	}
-	if _debug_print_ {
+	if r.debugPrint {
 		println("runFunc1", fnname, fn)
 	}
 	r.visitBasicBlock(fnname, fn.Blocks[0])
@@ -550,19 +548,19 @@ func (r *CheckerRunner) runFunc1(fn *ssa.Function) {
 				elem := freevar.Type().Underlying().(*types.Pointer).Elem()
 				if _, ok := elem.(*types.Basic); ok {
 					tmp := RecordField{ref[i], freevar, 0, isWrite(ref[i], freevar), false}
-					r.RecordSet_Basic = append(r.RecordSet_Basic, tmp)
+					r.RecordsetBasic = append(r.RecordsetBasic, tmp)
 				}
 				if _, ok := elem.(*types.Array); ok {
 					tmp := RecordField{ref[i], freevar, 0, isWrite(ref[i], freevar), false}
-					r.RecordSet_Array = append(r.RecordSet_Array, tmp)
+					r.RecordSetArray = append(r.RecordSetArray, tmp)
 				}
 				if _, ok := elem.(*types.Struct); ok {
 					tmp := RecordField{ref[i], freevar, 0, isWrite(ref[i], freevar), false}
-					r.RecordSet_Field = append(r.RecordSet_Field, tmp)
+					r.RecordsetField = append(r.RecordsetField, tmp)
 				}
 				if _, ok := elem.(*types.Map); ok {
 					tmp := RecordField{ref[i], freevar, 0, isWrite(ref[i], freevar), false}
-					r.RecordSet_Map = append(r.RecordSet_Map, tmp)
+					r.RecordsetMap = append(r.RecordsetMap, tmp)
 				}
 			}
 		}
@@ -739,8 +737,8 @@ func (r *CheckerRunner) GetBefore(start ssa.Instruction, op1 ssa.Instruction) (s
 			}
 		}
 		if bb.Comment == "select.body" {
-			next_block := bb.Preds[0]
-			icmp := next_block.Instrs[len(next_block.Instrs)-2].(*ssa.BinOp)
+			nextBlock := bb.Preds[0]
+			icmp := nextBlock.Instrs[len(nextBlock.Instrs)-2].(*ssa.BinOp)
 			icase = int(icmp.Y.(*ssa.Const).Int64())
 		}
 		bb = bb.Idom()
@@ -1000,7 +998,7 @@ func (r *CheckerRunner) CheckHappendBefore(prog *ssa.Program, cg *callgraph.Grap
 
 	lastOp1, lastOp2 := GetLastOp(ctx1, ctx2)
 	if !CheckReachableInstr(ctx1[lastOp1], ctx2[lastOp2]) && !CheckReachableInstr(ctx2[lastOp2], ctx1[lastOp1]) {
-		if _debug_print_ {
+		if r.debugPrint {
 			println("Reason: lastOp")
 		}
 		return
@@ -1009,9 +1007,6 @@ func (r *CheckerRunner) CheckHappendBefore(prog *ssa.Program, cg *callgraph.Grap
 	if !hasGoCall(lastOp1, ctx1) && !hasGoCall(lastOp2, ctx2) {
 		return
 	}
-
-	set1 := r.GetBeforeAfertSet(ctx1, field[1].ins)
-	set2 := r.GetBeforeAfertSet(ctx2, field[0].ins)
 
 	if len(ctx1) == len(ctx2) {
 		isSame := true
@@ -1022,58 +1017,45 @@ func (r *CheckerRunner) CheckHappendBefore(prog *ssa.Program, cg *callgraph.Grap
 			}
 		}
 		if isSame {
-			if _debug_print_ {
+			if r.debugPrint {
 				println("Reason: Same Ctx")
 			}
 			return
 		}
 	}
 
-	flag := false
-	elem := GetValue(field[0].value).Type().Underlying()
-	for p, ok := elem.(*types.Pointer); ok; p, ok = elem.(*types.Pointer) {
-		elem = p.Elem()
-	}
-	switch elem.(type) {
-	case *types.Slice:
-		flag = true
-	case *types.Basic:
-		flag = true
-	case *types.Named:
-		flag = true
-	case *types.Struct:
-		flag = true
-	}
+	set1 := r.GetBeforeAfertSet(ctx1, field[1].ins)
+	set2 := r.GetBeforeAfertSet(ctx2, field[0].ins)
 
-	if flag && r.hasSameLock(set1[0], set2[0]) {
-		if _debug_print_ {
+	if r.hasSameLock(set1[0], set2[0]) {
+		if r.debugPrint {
 			println("Reason: Same Clock")
 		}
 		return
 	}
 
 	if FindGoCallInAfterSet(ctx1, set2[1], field[1].ins) {
-		if _debug_print_ {
+		if r.debugPrint {
 			println("Reason: FindGoCallInAfterSet1")
 		}
 		return
 	}
 
 	if FindGoCallInAfterSet(ctx2, set1[1], field[0].ins) {
-		if _debug_print_ {
+		if r.debugPrint {
 			println("Reason: FindGoCallInAfterSet2")
 		}
 		return
 	}
 
 	if r.HappensBeforeFromSet(set1[0], set2[1]) {
-		if _debug_print_ {
+		if r.debugPrint {
 			println("Reason: HappensBeforeFromSet1")
 		}
 		return
 	}
 	if r.HappensBeforeFromSet(set2[0], set1[1]) {
-		if _debug_print_ {
+		if r.debugPrint {
 			println("Reason: HappensBeforeFromSet2")
 		}
 		return
@@ -1106,14 +1088,14 @@ func (r *CheckerRunner) PrintResult() {
 		for j := range v {
 			p1, p2 := v[j].field[0], v[j].field[1]
 			fmt.Printf("Access1: %s @ %s\tAtomic:%t\tWrite:%t\n", p1.ins.String(), toString(r.prog, p1.ins), p1.isAtomic, p1.isWrite)
-			if _print_ctx_ {
+			if r.printCtx {
 				PrintCtx(r.prog, v[j].ctx[0])
 			}
 			fmt.Printf("Access2: %s @ %s\tAtomic:%t\tWrite:%t\n", p2.ins.String(), toString(r.prog, p2.ins), p2.isAtomic, p2.isWrite)
-			if _print_ctx_ {
+			if r.printCtx {
 				PrintCtx(r.prog, v[j].ctx[1])
 			}
-			if !_detailreport_ {
+			if !r.detailReport {
 				if len(v) > 1 {
 					fmt.Printf("\t and more %d race ...", len(v)-1)
 				}
@@ -1136,9 +1118,14 @@ func (r *CheckerRunner) PrintResult() {
 }
 
 func main() {
-	fmt.Fprintln(os.Stderr, "Run for [ZZZ]:", os.Args[1])
-	cfg := packages.Config{Mode: packages.LoadAllSyntax, Tests: _UseTestCase_}
-	initial, err := packages.Load(&cfg, os.Args[1])
+	runner := &CheckerRunner{}
+	flag.BoolVar(&runner.useTestCase, "t", true, "include test code [default: true]")
+	flag.BoolVar(&runner.chaCallGraph, "p", false, "use cha call graph only [default: false]")
+	flag.BoolVar(&runner.debugPrint, "debug", false, "print debug info to stderr [default: false]")
+	flag.BoolVar(&runner.detailReport, "d", false, "report all race pair [default: false]")
+	flag.BoolVar(&runner.printCtx, "c", false, "report context for race pair [default: false]")
+	cfg := packages.Config{Mode: packages.LoadAllSyntax, Tests: runner.useTestCase}
+	initial, err := packages.Load(&cfg, flag.Args()[0])
 	if err != nil {
 		return
 		//log.Fatal(err)
@@ -1148,11 +1135,11 @@ func main() {
 		pkgerr += len(pkg.Errors)
 	})
 
-	if (pkgerr > 0 && !_debug_print_) || packages.PrintErrors(initial) > 0 {
+	if (pkgerr > 0 && !runner.debugPrint) || packages.PrintErrors(initial) > 0 {
 		return
 	}
 
-	if _UseTestCase_ {
+	if runner.useTestCase {
 
 		// For example, when using the go command, loading "fmt" with Tests=true
 		// returns four packages, with IDs "fmt" (the standard package),
@@ -1179,10 +1166,8 @@ func main() {
 	// Build SSA code for the whole program.
 	prog.Build()
 
-	runner := &CheckerRunner{
-		prog: prog,
-		pkgs: pkgs,
-	}
+	runner.prog = prog
+	runner.pkgs = pkgs
 
 	runner.RacePairsAnalyzerRun()
 	runner.PrintResult()
