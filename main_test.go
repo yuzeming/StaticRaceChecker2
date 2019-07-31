@@ -90,7 +90,7 @@ func CmpResult(t *testing.T, runner *CheckerRunner, expected SimpleResult, zero 
 
 func RunTestCase(t *testing.T, myprog string, except SimpleResult, firstlineno int) {
 	prog, pkgs := GetProgAndPkgs(t, myprog)
-	r := &CheckerRunner{prog: prog, pkgs: pkgs}
+	r := &CheckerRunner{prog: prog, pkgs: pkgs, path: pkgs[0].Pkg.Path()}
 	r.RacePairsAnalyzerRun()
 
 	//r.PrintResult()

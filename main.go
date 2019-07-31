@@ -121,7 +121,7 @@ func GetAnnoFunctionList(fn *ssa.Function) (anfn []*ssa.Function) {
 func (r *CheckerRunner) CheckPkgPath(fn *ssa.Function) bool {
 	return fn.Blocks != nil && fn.Pkg != nil && fn.Name() != "init" &&
 		strings.HasPrefix(fn.Pkg.Pkg.Path(), r.path) &&
-		!strings.HasPrefix(fn.Pkg.Pkg.Path(), r.excludePath)
+		(r.excludePath == "" || !strings.HasPrefix(fn.Pkg.Pkg.Path(), r.excludePath))
 }
 
 func (r *CheckerRunner) RacePairsAnalyzerRun() {
@@ -1034,7 +1034,7 @@ func (r *CheckerRunner) CheckHappendBefore(prog *ssa.Program, cg *callgraph.Grap
 
 	if r.hasSameLock(set1[0], set2[0]) {
 		if r.debugPrint {
-			println("Reason: Same Clock")
+			println("Reason: Same Lock")
 		}
 		return
 	}
