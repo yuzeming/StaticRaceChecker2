@@ -20,6 +20,7 @@ import (
 const _UseTestCase_ = true
 const _debug_print_ = false
 const _ChaCallGraph_ = false
+const _detailreport_ = true
 
 type RecordField struct {
 	ins      ssa.Instruction
@@ -215,10 +216,20 @@ func (r *CheckerRunner) RacePairsAnalyzerRun() {
 		}
 	}
 
-	r.PairSet = append(r.PairSet, r.GenPair(r.RecordSet_Field)...)
-	r.PairSet = append(r.PairSet, r.GenPair(r.RecordSet_Array)...)
-	r.PairSet = append(r.PairSet, r.GenPair(r.RecordSet_Basic)...)
-	r.PairSet = append(r.PairSet, r.GenPair(r.RecordSet_Map)...)
+	var wg sync.WaitGroup
+	var tmp_pair [4][][2]RecordField
+	for i, pair := range [][]RecordField{r.RecordSet_Field, r.RecordSet_Array, r.RecordSet_Basic, r.RecordSet_Map} {
+		wg.Add(1)
+		go func(i int, pair []RecordField) {
+			tmp_pair[i] = r.GenPair(pair)
+			wg.Done()
+		}(i, pair)
+	}
+	wg.Wait()
+
+	for i := range tmp_pair {
+		r.PairSet = append(r.PairSet, tmp_pair[i]...)
+	}
 
 	if _debug_print_ {
 		println("PairSet")
@@ -242,10 +253,28 @@ func (r *CheckerRunner) RacePairsAnalyzerRun() {
 		}
 	}
 
+	MX := 64
+	if _debug_print_ {
+		MX = 1
+	}
+	ch := make(chan int, MX)
+	var mu sync.Mutex
+
 	for _, x := range r.PairSet {
-		if CheckReachablePair(callGraph, x) {
-			r.ReachablePairSet = append(r.ReachablePairSet, x)
-		}
+		r1 := x
+		ch <- 1
+		go func() {
+			if CheckReachablePair(callGraph, r1) {
+				mu.Lock()
+				r.ReachablePairSet = append(r.ReachablePairSet, r1)
+				mu.Unlock()
+			}
+			<-ch
+		}()
+	}
+
+	for i := 0; i < MX; i++ {
+		ch <- 1
 	}
 
 	if _debug_print_ {
@@ -255,11 +284,9 @@ func (r *CheckerRunner) RacePairsAnalyzerRun() {
 		}
 	}
 
-	MX := 64
-	if _debug_print_ {
-		MX = 1
+	for i := 0; i < MX; i++ {
+		<-ch
 	}
-	ch := make(chan int, MX)
 
 	for _, x := range r.ReachablePairSet {
 		r1 := x
@@ -337,7 +364,7 @@ func CheckReachablePair(cg *callgraph.Graph, field [2]RecordField) bool {
 		state := seen[now]
 		for _, e := range now.Out {
 			new_state := state
-			if _, isGo := e.Site.(*ssa.Go); isGo {
+			if _, isGo := e.Site.(*ssa.Go); isGo && !BlackFuncList[e.Site.Common().Value.String()] {
 				new_state = 2
 			}
 			if seen[e.Callee] < new_state {
@@ -566,6 +593,7 @@ var BlackFuncList = map[string]bool{
 	"(*testing.B).Run":           true,
 	"(*testing.M).Run":           true,
 	"workqueue.ParallelizeUntil": true,
+	"(*syncmap.Map).Range":       true,
 }
 
 func PathSearch(start, end *callgraph.Node) (ret []*callgraph.Edge) {
@@ -891,8 +919,8 @@ func (r *CheckerRunner) ReportRaceWithCtx(prog *ssa.Program, field [2]RecordFiel
 	r.ResultSet[val] = append(r.ResultSet[val], &Result{field: field, ctx: ctx})
 }
 
-func hasGoCall(ctx ContextList) bool {
-	for i := range ctx {
+func hasGoCall(start int, ctx ContextList) bool {
+	for i := start; i < len(ctx); i++ {
 		if _, ok := ctx[i].(*ssa.Go); ok {
 			return true
 		}
@@ -933,8 +961,8 @@ func (r *CheckerRunner) hasSameLock(set1, set2 SyncMutexList) bool {
 	return false
 }
 
-func GetLastOp(ctx1, ctx2 ContextList) (a, b ssa.Instruction) {
-	p1, p2 := 0, 0
+func GetLastOp(ctx1, ctx2 ContextList) (p1, p2 int) {
+	p1, p2 = 0, 0
 	for p1 < len(ctx1) && p2 < len(ctx2) {
 		fn := ctx1[p1].Parent()
 		for p1+1 < len(ctx1) && ctx1[p1+1].Parent() == fn {
@@ -950,7 +978,7 @@ func GetLastOp(ctx1, ctx2 ContextList) (a, b ssa.Instruction) {
 			break
 		}
 	}
-	return ctx1[p1], ctx2[p2]
+	return p1, p2
 }
 
 func (r *CheckerRunner) CheckHappendBefore(prog *ssa.Program, cg *callgraph.Graph, field [2]RecordField) {
@@ -970,10 +998,14 @@ func (r *CheckerRunner) CheckHappendBefore(prog *ssa.Program, cg *callgraph.Grap
 	ctx2 := append(GenContextPath(startpoint, node2), field[1].ins)
 
 	lastOp1, lastOp2 := GetLastOp(ctx1, ctx2)
-	if !CheckReachableInstr(lastOp1, lastOp2) && !CheckReachableInstr(lastOp2, lastOp1) {
+	if !CheckReachableInstr(ctx1[lastOp1], ctx2[lastOp2]) && !CheckReachableInstr(ctx2[lastOp2], ctx1[lastOp1]) {
 		if _debug_print_ {
 			println("Reason: lastOp")
 		}
+		return
+	}
+
+	if !hasGoCall(lastOp1, ctx1) && !hasGoCall(lastOp2, ctx2) {
 		return
 	}
 
@@ -989,13 +1021,11 @@ func (r *CheckerRunner) CheckHappendBefore(prog *ssa.Program, cg *callgraph.Grap
 			}
 		}
 		if isSame {
-			println("Reason: Same Ctx")
+			if _debug_print_ {
+				println("Reason: Same Ctx")
+			}
 			return
 		}
-	}
-
-	if !hasGoCall(ctx1) && !hasGoCall(ctx2) {
-		return
 	}
 
 	flag := false
@@ -1054,13 +1084,15 @@ func (r *CheckerRunner) CheckHappendBefore(prog *ssa.Program, cg *callgraph.Grap
 func (r *CheckerRunner) PrintResult() {
 	for k, v := range r.ResultSet {
 		fmt.Println("Race Found:[ZZZ]", toStringValue(r.prog, k), k.String())
-		for _, c := range v {
-			fmt.Println(toString(r.prog, c.field[0].ins), "Func:", c.field[0].ins.Parent().Name())
-			PrintCtx(r.prog, c.ctx[0])
-			fmt.Println("------------")
-			fmt.Println(toString(r.prog, c.field[1].ins), "Func:", c.field[1].ins.Parent().Name())
-			PrintCtx(r.prog, c.ctx[1])
-			fmt.Println("============")
+		if _detailreport_ {
+			for _, c := range v {
+				fmt.Println(toString(r.prog, c.field[0].ins), "Func:", c.field[0].ins.Parent().Name())
+				PrintCtx(r.prog, c.ctx[0])
+				fmt.Println("------------")
+				fmt.Println(toString(r.prog, c.field[1].ins), "Func:", c.field[1].ins.Parent().Name())
+				PrintCtx(r.prog, c.ctx[1])
+				fmt.Println("============")
+			}
 		}
 	}
 }
