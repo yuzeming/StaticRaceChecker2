@@ -683,3 +683,19 @@ func main() {
 `
 	RunTestCase(t, myprog, SimpleResult{}, 0)
 }
+
+func TestMute(t *testing.T) {
+	myprog := `package main
+func main() {
+	a := 1
+	go func(){
+		a=2 // [MUTE]
+	}()
+	func() {
+		a=3
+	}()
+	println(a)
+}
+`
+	RunTestCase(t, myprog, SimpleResult{}, 0)
+}

@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"go/parser"
 	"go/token"
 	"go/types"
 	"golang.org/x/tools/go/callgraph"
@@ -42,6 +43,8 @@ type CheckerRunner struct {
 	excludePath  string
 
 	//temp info
+	MuteMap map[int]bool
+
 	RecordsetField   []RecordField
 	RecordSetArray   []RecordField
 	RecordsetBasic   []RecordField
@@ -118,15 +121,47 @@ func GetAnnoFunctionList(fn *ssa.Function) (anfn []*ssa.Function) {
 	return anfn
 }
 
-func (r *CheckerRunner) CheckPkgPath(fn *ssa.Function) bool {
+func (r *CheckerRunner) CheckFnPath(fn *ssa.Function) bool {
 	return fn.Blocks != nil && fn.Pkg != nil && fn.Name() != "init" &&
 		strings.HasPrefix(fn.Pkg.Pkg.Path(), r.path) &&
 		(r.excludePath == "" || !strings.HasPrefix(fn.Pkg.Pkg.Path(), r.excludePath))
 }
 
+func (r *CheckerRunner) CheckPkgPath(pkg *ssa.Package) bool {
+	return strings.HasPrefix(pkg.Pkg.Path(), r.path) &&
+		(r.excludePath == "" || !strings.HasPrefix(pkg.Pkg.Path(), r.excludePath))
+}
+
+func (r *CheckerRunner) BuildMuteMap() {
+	r.MuteMap = make(map[int]bool)
+	fset := token.NewFileSet()
+	r.prog.Fset.Iterate(func(file *token.File) bool {
+		f, err := parser.ParseFile(fset, file.Name(), nil, parser.ParseComments)
+		if err != nil {
+			return false
+		}
+		for _, cg := range f.Comments {
+			for _, c := range cg.List {
+				if strings.HasPrefix(strings.TrimLeft(c.Text, "/ "), "[MUTE]") {
+					r.MuteMap[int(c.Pos())-fset.Position(c.Pos()).Column] = true
+				}
+			}
+		}
+		return true
+	})
+}
+
+func (r *CheckerRunner) CheckInMuteMap(pos token.Pos) bool {
+	p := int(pos) - r.prog.Fset.Position(pos).Column
+	return !r.MuteMap[p]
+}
+
 func (r *CheckerRunner) RacePairsAnalyzerRun() {
 	prog := r.prog
 	pkgs := r.pkgs
+
+	r.BuildMuteMap()
+
 	var mainPkgs []*ssa.Package
 	for _, pkg := range pkgs {
 		if pkg != nil {
@@ -163,7 +198,7 @@ func (r *CheckerRunner) RacePairsAnalyzerRun() {
 	FuncsList := ssautil.AllFunctions(prog)
 
 	for fn := range FuncsList {
-		if r.CheckPkgPath(fn) {
+		if r.CheckFnPath(fn) {
 			r.runFunc1(fn)
 
 			if callGraph.Nodes[fn] == nil && fn.Parent() == nil {
@@ -315,10 +350,11 @@ func hasPos(ins ssa.Instruction) bool {
 
 func (r *CheckerRunner) GenPair(RecordSet []RecordField) (ret [][2]RecordField) {
 	for i := range RecordSet {
-		if pi := RecordSet[i]; pi.isWrite {
+		if pi := RecordSet[i]; pi.isWrite && r.CheckInMuteMap(pi.ins.Pos()) && r.CheckInMuteMap(GetValue(pi.value).Pos()) {
 			for j := range RecordSet {
 				if pj := RecordSet[j]; !pj.isWrite || i < j {
-					if pi.ins.Parent().Pkg == pj.ins.Parent().Pkg &&
+					if r.CheckInMuteMap(pj.ins.Pos()) &&
+						pi.ins.Parent().Pkg == pj.ins.Parent().Pkg &&
 						reflect.DeepEqual(pi.value.Type(), pj.value.Type()) &&
 						pi.Field == pj.Field &&
 						pi.ins.Block() != pj.ins.Block() &&
