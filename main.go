@@ -12,7 +12,11 @@ import (
 	"golang.org/x/tools/go/pointer"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
+	"io/ioutil"
+	"log"
+	"os"
 	"path"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -34,13 +38,16 @@ type Result struct {
 
 type CheckerRunner struct {
 	// config
+	indexStart int
+	recursive  bool
+
 	useTestCase  bool
 	debugPrint   bool
 	chaCallGraph bool
 	detailReport bool
 	printCtx     bool
 	path         string
-	excludePath  string
+	whitelist    string
 
 	//temp info
 	MuteMap map[int]bool
@@ -121,17 +128,6 @@ func GetAnnoFunctionList(fn *ssa.Function) (anfn []*ssa.Function) {
 	return anfn
 }
 
-func (r *CheckerRunner) CheckFnPath(fn *ssa.Function) bool {
-	return fn.Blocks != nil && fn.Pkg != nil && fn.Name() != "init" &&
-		strings.HasPrefix(fn.Pkg.Pkg.Path(), r.path) &&
-		(r.excludePath == "" || !strings.HasPrefix(fn.Pkg.Pkg.Path(), r.excludePath))
-}
-
-func (r *CheckerRunner) CheckPkgPath(pkg *ssa.Package) bool {
-	return strings.HasPrefix(pkg.Pkg.Path(), r.path) &&
-		(r.excludePath == "" || !strings.HasPrefix(pkg.Pkg.Path(), r.excludePath))
-}
-
 func (r *CheckerRunner) BuildMuteMap() {
 	r.MuteMap = make(map[int]bool)
 	fset := token.NewFileSet()
@@ -197,8 +193,13 @@ func (r *CheckerRunner) RacePairsAnalyzerRun() {
 
 	FuncsList := ssautil.AllFunctions(prog)
 
+	pkgMap := make(map[*ssa.Package]bool)
+	for _, pkg := range pkgs {
+		pkgMap[pkg] = true
+	}
+
 	for fn := range FuncsList {
-		if r.CheckFnPath(fn) {
+		if fn.Blocks != nil && fn.Pkg != nil && fn.Name() != "init" && pkgMap[fn.Pkg] {
 			r.runFunc1(fn)
 
 			if callGraph.Nodes[fn] == nil && fn.Parent() == nil {
@@ -354,7 +355,6 @@ func (r *CheckerRunner) GenPair(RecordSet []RecordField) (ret [][2]RecordField) 
 			for j := range RecordSet {
 				if pj := RecordSet[j]; !pj.isWrite || i < j {
 					if r.CheckInMuteMap(pj.ins.Pos()) &&
-						pi.ins.Parent().Pkg == pj.ins.Parent().Pkg &&
 						reflect.DeepEqual(pi.value.Type(), pj.value.Type()) &&
 						pi.Field == pj.Field &&
 						pi.ins.Block() != pj.ins.Block() &&
@@ -665,11 +665,15 @@ func PathSearch(start, end *callgraph.Node) (ret []*callgraph.Edge) {
 	return
 }
 
-func CleanDefer(x SyncMutexList) (ret SyncMutexList) {
+func SetDeferFlag(x SyncMutexList, flag bool) (ret SyncMutexList) {
 	for i := range x {
-		x[i].deferCall = false
+		x[i].deferCall = flag
 	}
 	return x
+}
+
+func isSmallFunc(fn *ssa.Function) bool {
+	return len(fn.Params) == 0 && len(fn.FreeVars) > 0 && len(fn.Blocks) == 1 && len(fn.Blocks[0].Instrs) < 20
 }
 
 func (r *CheckerRunner) GetSyncValue(instr ssa.Instruction, dir int, op1 ssa.Instruction, icase *int) (ret SyncMutexList) {
@@ -708,15 +712,6 @@ func (r *CheckerRunner) GetSyncValue(instr ssa.Instruction, dir int, op1 ssa.Ins
 			if _, ischen := ins.Call.Args[0].Type().(*types.Chan); ischen {
 				return SyncMutexList{SyncMutexItem{ins.Call.Args[0], ins, 3, false}} //3 for close chan
 			}
-		case "(*golang.org/x/sync/errgroup.Group).Wait":
-			fn, ok := ins.Call.Value.(*ssa.Function)
-			if dir == 1 && ok {
-				return CleanDefer(r.GetBefore(fn.Blocks[0].Instrs[0], op1))
-			}
-			if dir == -1 && ok {
-				return CleanDefer(r.GetAfter(fn.Blocks[0].Instrs[0], op1))
-			}
-			return nil
 		}
 		if (strings.HasSuffix(sig, ").Lock") || strings.HasSuffix(sig, ").RLock")) && len(ins.Call.Args) == 1 {
 			return SyncMutexList{SyncMutexItem{value: ins.Call.Args[0], deferCall: false, op: 10}} //10 for Lock
@@ -724,6 +719,15 @@ func (r *CheckerRunner) GetSyncValue(instr ssa.Instruction, dir int, op1 ssa.Ins
 		if (strings.HasSuffix(sig, ").Unlock") || strings.HasSuffix(sig, ").RUnlock")) && len(ins.Call.Args) == 1 {
 			return SyncMutexList{SyncMutexItem{value: ins.Call.Args[0], deferCall: false, op: 11}} //11 for Unlock
 		}
+
+		closure, ok := ins.Call.Value.(*ssa.MakeClosure)
+		if ok {
+			fn, ok2 := closure.Fn.(*ssa.Function)
+			if ok2 && isSmallFunc(fn) {
+				return SetDeferFlag(r.GetAfter(fn.Blocks[0].Instrs[0], op1), false)
+			}
+		}
+
 		return SyncMutexList{SyncMutexItem{nil, ins, 31, false}} //31 for normal call
 
 	case *ssa.Defer:
@@ -737,15 +741,6 @@ func (r *CheckerRunner) GetSyncValue(instr ssa.Instruction, dir int, op1 ssa.Ins
 			if _, ischen := ins.Call.Args[0].Type().(*types.Chan); ischen {
 				return SyncMutexList{SyncMutexItem{ins.Call.Args[0], ins, 3, true}} //3 for close chan
 			}
-		case "(*golang.org/x/sync/errgroup.Group).Wait":
-			fn, ok := ins.Call.Value.(*ssa.Function)
-			if dir == 1 && ok {
-				return CleanDefer(r.GetBefore(fn.Blocks[0].Instrs[0], op1))
-			}
-			if dir == -1 && ok {
-				return CleanDefer(r.GetAfter(fn.Blocks[0].Instrs[0], op1))
-			}
-			return nil
 		}
 		if (strings.HasSuffix(sig, ").Lock") || strings.HasSuffix(sig, ").RLock")) && len(ins.Call.Args) == 1 {
 			return SyncMutexList{SyncMutexItem{value: ins.Call.Args[0], deferCall: true, op: 10}} //10 for Lock
@@ -753,6 +748,15 @@ func (r *CheckerRunner) GetSyncValue(instr ssa.Instruction, dir int, op1 ssa.Ins
 		if (strings.HasSuffix(sig, ").Unlock") || strings.HasSuffix(sig, ").RUnlock")) && len(ins.Call.Args) == 1 {
 			return SyncMutexList{SyncMutexItem{value: ins.Call.Args[0], deferCall: true, op: 11}} //11 for Unlock
 		}
+
+		closure, ok := ins.Call.Value.(*ssa.MakeClosure)
+		if ok {
+			fn, ok2 := closure.Fn.(*ssa.Function)
+			if ok2 && isSmallFunc(fn) {
+				return SetDeferFlag(r.GetAfter(fn.Blocks[0].Instrs[0], op1), true)
+			}
+		}
+
 	case *ssa.Go:
 		return SyncMutexList{SyncMutexItem{nil, ins, 30, false}} //30 for GoCall
 	default:
@@ -1111,7 +1115,7 @@ func (s ValueList) Len() int           { return len(s) }
 func (s ValueList) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
 func (s ValueList) Less(i, j int) bool { return s[i].Pos() < s[j].Pos() }
 
-func (r *CheckerRunner) PrintResult() {
+func (r *CheckerRunner) PrintResult() int {
 	r.ResultMux.Lock()
 	defer r.ResultMux.Unlock()
 	var varlist ValueList
@@ -1121,7 +1125,7 @@ func (r *CheckerRunner) PrintResult() {
 	sort.Sort(varlist)
 
 	for i := range varlist {
-		k := varlist[i]
+		k := varlist[i+r.indexStart]
 		v := r.ResultSet[k]
 		fmt.Printf("----------Bug[%d]----------\n", i)
 		fmt.Printf("Type: Data Race \tReason: Two goroutines access the same variable concurrently and at least one of the accesses is a write. \n")
@@ -1156,23 +1160,18 @@ func (r *CheckerRunner) PrintResult() {
 		//	}
 		//}
 	}
+	return len(varlist)
 }
 
-func main() {
-	runner := &CheckerRunner{}
-	flag.BoolVar(&runner.useTestCase, "t", true, "include test code [default: true]")
-	flag.BoolVar(&runner.chaCallGraph, "p", false, "use cha call graph only [default: false]")
-	flag.BoolVar(&runner.debugPrint, "debug", false, "print debug info to stderr [default: false]")
-	flag.BoolVar(&runner.detailReport, "d", false, "report all race pair [default: false]")
-	flag.BoolVar(&runner.printCtx, "c", false, "report context for every race pair [default: false]")
-	flag.StringVar(&runner.path, "path", "", "Path to package")
-	flag.Parse()
-	runner.excludePath = path.Join(runner.path, "vendor")
+func Run(conf *CheckerRunner, path string) int {
+	runner := *conf
+	runner.path = path
+
 	cfg := packages.Config{Mode: packages.LoadAllSyntax, Tests: runner.useTestCase}
 	initial, err := packages.Load(&cfg, runner.path)
 	if err != nil {
-		return
-		//log.Fatal(err)
+		log.Fatal(err)
+		return 0
 	}
 	pkgerr := 0
 	packages.Visit(initial, nil, func(pkg *packages.Package) {
@@ -1180,7 +1179,7 @@ func main() {
 	})
 
 	if (pkgerr > 0 && !runner.debugPrint) || packages.PrintErrors(initial) > 0 {
-		return
+		return 0
 	}
 
 	if runner.useTestCase {
@@ -1209,5 +1208,67 @@ func main() {
 	runner.pkgs = pkgs
 
 	runner.RacePairsAnalyzerRun()
-	runner.PrintResult()
+	return runner.PrintResult()
+}
+
+func HasGoFileInDir(path1 string) bool {
+	files, err := ioutil.ReadDir(path1)
+	if err != nil {
+		return false
+	}
+	for _, f := range files {
+		if !f.IsDir() && strings.HasSuffix(f.Name(), ".go") {
+			return true
+		}
+	}
+	return false
+}
+
+func main() {
+	conf := &CheckerRunner{}
+	flag.BoolVar(&conf.useTestCase, "t", true, "include test code")
+	flag.BoolVar(&conf.chaCallGraph, "p", false, "use cha call graph only")
+	flag.BoolVar(&conf.debugPrint, "debug", false, "print debug info to stderr")
+	flag.BoolVar(&conf.detailReport, "d", false, "report all race pair")
+	flag.BoolVar(&conf.printCtx, "c", false, "report context for every race pair")
+	flag.StringVar(&conf.path, "path", "", "Path to  package ( must under %GOPATH% dir )")
+	flag.BoolVar(&conf.recursive, "r", false, "recursive entry subdir")
+	//flag.StringVar(&conf.whitelist,"whitelist","","Add a whitelist file ( format: FileName:LineNumber )")
+	flag.Parse()
+
+	if conf.path == "" {
+		flag.PrintDefaults()
+		return
+	}
+
+	var dirlist []string
+	if conf.recursive {
+		gopath, _ := os.LookupEnv("GOPATH")
+		gosrc := path.Join(gopath, "src")
+		err := filepath.Walk(path.Join(gosrc, conf.path), func(path1 string, info os.FileInfo, err error) error {
+			//println(path1)
+			if !info.IsDir() {
+				return nil
+			}
+
+			if err != nil || info.Name()[0] == '.' || info.Name() == "vendor" {
+				return filepath.SkipDir
+			}
+			if HasGoFileInDir(path1) {
+				dirlist = append(dirlist, path1[len(gosrc)+1:])
+			}
+			return nil
+		})
+		if err != nil {
+			log.Fatal(err)
+		}
+	} else {
+		dirlist = append(dirlist, conf.path)
+	}
+
+	for _, p := range dirlist {
+		tmp := Run(conf, p)
+		conf.indexStart += tmp
+	}
+
 }
