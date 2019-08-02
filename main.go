@@ -354,10 +354,6 @@ func isInAnnoFunc(ins ssa.Instruction) bool {
 	return ins.Parent().Parent() != nil
 }
 
-func hasPos(ins ssa.Instruction) bool {
-	return ins.Pos() != token.NoPos
-}
-
 func (r *CheckerRunner) GenPair(RecordSet []RecordField) (ret [][2]RecordField) {
 	for i := range RecordSet {
 		if pi := RecordSet[i]; r.CheckInMuteMap(pi.ins.Pos()) && r.CheckInMuteMap(GetValue(pi.value).Pos()) {
@@ -608,6 +604,7 @@ func (r *CheckerRunner) runFunc1(fn *ssa.Function) {
 			case *ssa.Call:
 			case *ssa.MapUpdate:
 			case *ssa.Lookup:
+			case *ssa.MakeClosure:
 			default:
 				r.AddOperation(ref[i], freevar, 0, isWrite(ref[i], freevar), false)
 			}
