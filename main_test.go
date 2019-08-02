@@ -72,18 +72,18 @@ func CmpResult(t *testing.T, runner *CheckerRunner, expected SimpleResult, zero 
 
 	for k, v := range recv {
 		if len(v) != len(expected[k]) {
-			t.Errorf("diff len %v:%v - %v", k, len(v), len(expected[k]))
+			t.Errorf("diff len %v: got%v expect %v", k, len(v), len(expected[k]))
 		} else {
 			for i := range v {
 				if v[i] != expected[k][i] {
-					t.Errorf("diff v %v %v", v[i], expected[k][i])
+					t.Errorf("diff v %v: got %v  expect %v", i, v[i], expected[k][i])
 				}
 			}
 		}
 	}
 	for k := range expected {
 		if recv[k] == nil {
-			t.Errorf("not found key %v: %v", k, expected[k])
+			t.Errorf("expected key not found:%v expect %v", k, expected[k])
 		}
 	}
 }
@@ -91,6 +91,8 @@ func CmpResult(t *testing.T, runner *CheckerRunner, expected SimpleResult, zero 
 func RunTestCase(t *testing.T, myprog string, except SimpleResult, firstlineno int) {
 	prog, pkgs := GetProgAndPkgs(t, myprog)
 	r := &CheckerRunner{prog: prog, pkgs: pkgs, path: pkgs[0].Pkg.Path()}
+	r.debugPrint = true
+	r.detailReport = true
 	r.RacePairsAnalyzerRun()
 
 	//r.PrintResult()
@@ -449,9 +451,9 @@ func aaaaa() (ret int,
 }
 `
 	RunTestCase(t, myprog, SimpleResult{
-		435: {{440, 444}, {440, 444}}, //duplicate result
-		436: {{441, 444}, {441, 444}},
-	}, 434)
+		441: {{446, 450}, {446, 450}, {446, 439}}, //duplicate result
+		442: {{447, 450}, {447, 450}, {447, 439}}, //duplicate result
+	}, 440)
 
 }
 
@@ -560,11 +562,10 @@ func main() {
 		println(got[i])
 	}
 }
-
 `
 	RunTestCase(t, myprog, SimpleResult{
-		548: {{554, 560}, {554, 558}},
-	}, 545)
+		4: {{10, 14}, {10, 15}, {10, 16}, {10, 14}, {10, 0}, {10, 16}},
+	}, 1)
 }
 
 func TestRaceArrayAppend2(t *testing.T) {
@@ -575,16 +576,16 @@ func RaceAppend() {
 	go func() {
 		a = append(a,100)
 	}()
-	a[0] =1
+	a[0] = 1
 
 	for i:=range a {
-		println(a[i])
+		println(i)
 	}
 }
 `
 	RunTestCase(t, myprog, SimpleResult{
-		573: {{576, 578}, {576, 581}},
-	}, 571)
+		3: {{8, 6}, {10, 6}, {8, 6}, {8, 6}, {0, 6}},
+	}, 1)
 }
 
 func TestRaceerrGroup(t *testing.T) {
@@ -684,18 +685,80 @@ func main() {
 	RunTestCase(t, myprog, SimpleResult{}, 0)
 }
 
-func TestMute(t *testing.T) {
+func TestDefer(t *testing.T) {
 	myprog := `package main
 func main() {
-	a := 1
-	go func(){
-		a=2 // [MUTE]
+	ch := make(chan int)
+	a:=1
+	go func() {
+		defer close(ch)
+		a=2
 	}()
-	func() {
-		a=3
-	}()
+	<-ch
 	println(a)
 }
 `
 	RunTestCase(t, myprog, SimpleResult{}, 0)
+
+}
+
+func TestDefer2(t *testing.T) {
+	myprog := `package main
+func main() {
+	ch := make(chan int)
+	a:=1
+	go func() {
+		a=2
+		defer func() {
+			a=3
+			ch <-1
+		}()
+		a=5
+	}()
+	<-ch
+	println(a)
+}
+`
+	RunTestCase(t, myprog, SimpleResult{}, 0)
+
+}
+
+func TestDeadCode(t *testing.T) {
+	myprog := `package main
+func DEADCODE() {
+	ch := make(chan int)
+	a:=1
+	go func() {
+		a=2
+		defer func() {
+			a=3
+			ch <-1
+		}()
+		a=5
+	}()
+	<-ch
+	println(a)
+}
+`
+	RunTestCase(t, myprog, SimpleResult{}, 0)
+}
+
+func TestMap(t *testing.T) {
+	myprog := `package main
+func main() {
+	bar := make(map[int]int)
+	for i:=1;i<=100;i++ {
+		bar[i]=i	
+	}
+	go func() {
+		delete(bar,10)
+	}()
+	for k,v := range bar {
+		bar[k]=v+1
+	}
+}
+`
+	RunTestCase(t, myprog, SimpleResult{
+		752: {{757, 760}, {757, 760}, {757, 759}, {757, 760}},
+	}, 750)
 }
