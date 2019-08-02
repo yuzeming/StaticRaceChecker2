@@ -58,6 +58,7 @@ type CheckerRunner struct {
 	RecordsetMap     []RecordField
 	PairSet          [][2]RecordField
 	ReachablePairSet [][2]RecordField
+	lastIns          ssa.Instruction
 
 	FastFreeVarMap map[*ssa.FreeVar]ssa.Value
 
@@ -98,26 +99,34 @@ func (r *CheckerRunner) LockupFreeVar(a *ssa.FreeVar) (ret ssa.Value) {
 	return ret
 }
 
-func GetValue(a ssa.Value) ssa.Value {
+func GetValueAndFid(a ssa.Value) (ssa.Value, int) {
 	switch b := a.(type) {
 	case *ssa.UnOp:
-		return GetValue(b.X)
+		return GetValueAndFid(b.X)
 	case *ssa.FieldAddr:
-		return GetValue(b.X)
+		x, y := GetValueAndFid(b.X)
+		return x, (y << 4) + b.Field
+	case *ssa.Slice:
+		return b.X, 0
 	}
-	return a
+	return a, 0
+}
+
+func GetValue(a ssa.Value) ssa.Value {
+	v, _ := GetValueAndFid(a)
+	return v
 }
 
 func (r *CheckerRunner) FastSame(a ssa.Value, b ssa.Value) bool {
-	a = GetValue(a)
-	b = GetValue(b)
+	a, fid1 := GetValueAndFid(a)
+	b, fid2 := GetValueAndFid(b)
 	if fa, isok := a.(*ssa.FreeVar); isok {
 		a = r.LockupFreeVar(fa)
 	}
-	if fb, isok := b.(*ssa.FreeVar); isok {
+	if fb, isok2 := b.(*ssa.FreeVar); isok2 {
 		b = r.LockupFreeVar(fb)
 	}
-	return a == b || reflect.DeepEqual(a, b)
+	return a == b && fid1 == fid2
 }
 
 func GetAnnoFunctionList(fn *ssa.Function) (anfn []*ssa.Function) {
@@ -351,17 +360,19 @@ func hasPos(ins ssa.Instruction) bool {
 
 func (r *CheckerRunner) GenPair(RecordSet []RecordField) (ret [][2]RecordField) {
 	for i := range RecordSet {
-		if pi := RecordSet[i]; pi.isWrite && r.CheckInMuteMap(pi.ins.Pos()) && r.CheckInMuteMap(GetValue(pi.value).Pos()) {
+		if pi := RecordSet[i]; r.CheckInMuteMap(pi.ins.Pos()) && r.CheckInMuteMap(GetValue(pi.value).Pos()) {
 			for j := range RecordSet {
-				if pj := RecordSet[j]; !pj.isWrite || i < j {
+				if pj := RecordSet[j]; i < j {
 					if r.CheckInMuteMap(pj.ins.Pos()) &&
-						reflect.DeepEqual(pi.value.Type(), pj.value.Type()) &&
+						(pi.isWrite || pj.isWrite) &&
+						//	reflect.DeepEqual(pi.value.Type(), pj.value.Type()) &&
 						pi.Field == pj.Field &&
 						pi.ins.Block() != pj.ins.Block() &&
 						(!pi.isAtomic || !pj.isAtomic) &&
 						(isInAnnoFunc(pi.ins) || isInAnnoFunc(pj.ins)) &&
-						r.FastSame(pi.value, pj.value) &&
-						hasPos(pi.ins) && hasPos(pj.ins) {
+						r.FastSame(pi.value, pj.value) { //&&
+						//hasPos(pi.ins) && hasPos(pj.ins)
+
 						ret = append(ret, [2]RecordField{pi, pj})
 					}
 				}
@@ -433,21 +444,68 @@ func toStringValue(prog *ssa.Program, val ssa.Value) string {
 	return (*prog.Fset).Position(val.Pos()).String()
 }
 
+func (r *CheckerRunner) AppendRecord(re []RecordField, t RecordField) []RecordField {
+	if len(re) == 0 || re[len(re)-1].ins != r.lastIns || re[len(re)-1].value != t.value { // just append
+		re = append(re, t)
+	} else if re[len(re)-1].isWrite && !t.isWrite {
+		return re
+	} else { // re[len(re)-1] is Read
+		re[len(re)-1] = t // replace the last item
+	}
+	return re
+}
+
+func (r *CheckerRunner) AddOperation(ins ssa.Instruction, v ssa.Value, field int, isW bool, isA bool) {
+	if _, is := ins.(*ssa.MakeClosure); is {
+		return
+	}
+	v, fid := GetValueAndFid(v)
+	tmp := RecordField{ins, v, (fid << 4) + field, isW, isA}
+
+	switch v.(type) {
+	case *ssa.Alloc, *ssa.FreeVar:
+		//ok
+	default:
+		return
+	}
+
+	loop := true
+	elem := v.Type().Underlying()
+	for loop {
+		loop = false
+		elem = elem.(*types.Pointer).Elem()
+		switch elem.(type) {
+		case *types.Basic:
+			r.RecordsetBasic = r.AppendRecord(r.RecordsetBasic, tmp)
+		case *types.Array, *types.Slice:
+			r.RecordSetArray = r.AppendRecord(r.RecordSetArray, tmp)
+		case *types.Struct, *types.Named:
+			r.RecordsetField = r.AppendRecord(r.RecordsetField, tmp)
+		case *types.Map:
+			r.RecordsetMap = r.AppendRecord(r.RecordsetMap, tmp)
+		case *types.Pointer:
+			loop = true
+		}
+	}
+}
+
 func (r *CheckerRunner) analysisInstrs(instrs ssa.Instruction) {
 	switch ins := instrs.(type) {
 	case *ssa.FieldAddr:
 		ref := *ins.Referrers()
 		for i := range ref {
-			tmp := RecordField{ref[i], ins.X, ins.Field, isWrite(ref[i], ins), false}
-			r.RecordsetField = append(r.RecordsetField, tmp)
+			r.AddOperation(ref[i], ins.X, ins.Field, isWrite(ref[i], ins), false)
 		}
 	case *ssa.IndexAddr:
 		ref := *ins.Referrers()
 		for i := range ref {
-			tmp := RecordField{ref[i], ins.X, 0, isWrite(ref[i], ins), false}
-			r.RecordSetArray = append(r.RecordSetArray, tmp)
+			r.AddOperation(ref[i], ins.X, 0, isWrite(ref[i], ins), false)
 		}
 	case *ssa.Alloc:
+		if !ins.Heap {
+			return
+		}
+
 		elem := ins.Type().Underlying().(*types.Pointer).Elem()
 		if _, ok := elem.(*types.Basic); ok && ins.Heap {
 			ref := *ins.Referrers()
@@ -455,29 +513,12 @@ func (r *CheckerRunner) analysisInstrs(instrs ssa.Instruction) {
 				if _, ok := ref[i].(*ssa.Call); ok {
 					continue // for atomic call
 				}
-				tmp := RecordField{ref[i], ins, 0, isWrite(ref[i], ins), false}
-				r.RecordsetBasic = append(r.RecordsetBasic, tmp)
+				r.AddOperation(ref[i], ins, 0, isWrite(ref[i], ins), false)
 			}
-		}
-		if _, ok := elem.(*types.Array); ok && ins.Heap {
+		} else {
 			ref := *ins.Referrers()
 			for i := range ref {
-				tmp := RecordField{ref[i], ins, 0, isWrite(ref[i], ins), false}
-				r.RecordSetArray = append(r.RecordSetArray, tmp)
-			}
-		}
-		if _, ok := elem.(*types.Struct); ok && ins.Heap {
-			ref := *ins.Referrers()
-			for i := range ref {
-				tmp := RecordField{ref[i], ins, 0, isWrite(ref[i], ins), false}
-				r.RecordsetField = append(r.RecordsetField, tmp)
-			}
-		}
-		if _, ok := elem.(*types.Map); ok && ins.Heap {
-			ref := *ins.Referrers()
-			for i := range ref {
-				tmp := RecordField{ref[i], ins, 0, isWrite(ref[i], ins), false}
-				r.RecordsetMap = append(r.RecordsetMap, tmp)
+				r.AddOperation(ref[i], ins, 0, isWrite(ref[i], ins), false)
 			}
 		}
 	case *ssa.MakeClosure:
@@ -492,67 +533,49 @@ func (r *CheckerRunner) analysisInstrs(instrs ssa.Instruction) {
 			switch fn2 {
 			case "AddInt32", "AddInt64", "AddUint32", "AddUint64", "AddUintptr":
 				//func AddInt64(addr *int64, delta int64) (new int64)
-				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, true}
-				r.RecordsetBasic = append(r.RecordsetBasic, tmp)
-				tmp2 := RecordField{instrs, ins.Call.Args[1], 0, false, false}
-				r.RecordsetBasic = append(r.RecordsetBasic, tmp2)
+				r.AddOperation(instrs, ins.Call.Args[0], 0, true, true)
+				r.AddOperation(instrs, ins.Call.Args[1], 0, false, false)
 			case "CompareAndSwapInt32", "CompareAndSwapInt64", "CompareAndSwapPointer", "CompareAndSwapUint32", "CompareAndSwapUint64", "CompareAndSwapUintptr":
 				//func CompareAndSwapInt32(addr *int32, old, new int32) (swapped bool)
-				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, true}
-				r.RecordsetBasic = append(r.RecordsetBasic, tmp)
-				tmp2 := RecordField{instrs, ins.Call.Args[1], 0, false, true}
-				r.RecordsetBasic = append(r.RecordsetBasic, tmp2)
+				r.AddOperation(instrs, ins.Call.Args[0], 0, true, true)
+				r.AddOperation(instrs, ins.Call.Args[1], 0, false, true)
 			case "LoadInt32", "LoadInt64", "LoadPointer", "LoadUint32", "LoadUint64", "LoadUintptr":
-				tmp := RecordField{instrs, ins.Call.Args[0], 0, false, true}
-				r.RecordsetBasic = append(r.RecordsetBasic, tmp)
+				r.AddOperation(instrs, ins.Call.Args[0], 0, false, true)
 			case "StoreInt32", "StoreInt64", "StorePointer", "StoreUint32", "StoreUint64", "StoreUintptr":
-				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, true}
-				r.RecordsetBasic = append(r.RecordsetBasic, tmp)
-				tmp2 := RecordField{instrs, ins.Call.Args[1], 0, false, false}
-				r.RecordsetBasic = append(r.RecordsetBasic, tmp2)
+				r.AddOperation(instrs, ins.Call.Args[0], 0, true, true)
+				r.AddOperation(instrs, ins.Call.Args[1], 0, false, false)
 			case "SwapPointer", "SwapUint32", "SwapUint64", "SwapUintptr":
-				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, true}
-				r.RecordsetBasic = append(r.RecordsetBasic, tmp)
-				tmp2 := RecordField{instrs, ins.Call.Args[1], 0, true, true}
-				r.RecordsetBasic = append(r.RecordsetBasic, tmp2)
+				r.AddOperation(instrs, ins.Call.Args[0], 0, true, true)
+				r.AddOperation(instrs, ins.Call.Args[1], 0, true, true)
 			}
 		} else {
 			switch fn {
 			case "builtin delete": // map delete
-				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, false}
-				r.RecordsetMap = append(r.RecordsetMap, tmp)
+				r.AddOperation(instrs, ins.Call.Args[0], 0, true, false)
+				r.AddOperation(instrs, ins.Call.Args[1], 0, false, false)
 			case "builtin append":
-				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, false}
-				r.RecordSetArray = append(r.RecordSetArray, tmp)
-				switch ins.Call.Args[1].Type().(type) {
-				case *types.Basic:
-					tmp2 := RecordField{instrs, ins.Call.Args[1], 0, false, false}
-					r.RecordsetBasic = append(r.RecordsetBasic, tmp2)
-				default:
-					tmp2 := RecordField{instrs, ins.Call.Args[1], 0, false, false}
-					r.RecordSetArray = append(r.RecordSetArray, tmp2)
-				}
+				//r.AddOperation(instrs, ins.Call.Args[0], 0, false, false)
+				r.AddOperation(instrs, ins.Call.Args[1], 0, false, false)
 			case "builtin len":
-				tmp := RecordField{instrs, ins.Call.Args[0], 0, false, false}
-				r.RecordSetArray = append(r.RecordSetArray, tmp)
+				r.AddOperation(instrs, ins.Call.Args[0], 0, false, false)
 			case "(*os.File).Write", "(*os.File).Read":
-				tmp2 := RecordField{instrs, ins.Call.Args[1], 0, fn == "(*os.File).Write", false}
-				r.RecordSetArray = append(r.RecordSetArray, tmp2)
+				r.AddOperation(instrs, ins.Call.Args[1], 0, fn != "(*os.File).Write", false)
 				fallthrough
 			case "(*os.File).Close":
-				tmp := RecordField{instrs, ins.Call.Args[0], 0, true, false}
-				r.RecordsetBasic = append(r.RecordsetBasic, tmp)
+				r.AddOperation(instrs, ins.Call.Args[0], 99, true, false) // this modify the stat of file, not the file pointer
 			}
 		}
 
 	case *ssa.MapUpdate:
-		tmp := RecordField{instrs, ins.Map, 0, true, false}
-		r.RecordsetMap = append(r.RecordsetMap, tmp)
+		r.AddOperation(instrs, ins.Map, 0, true, false)
+		r.AddOperation(instrs, ins.Key, 0, false, false)
+		r.AddOperation(instrs, ins.Value, 0, false, false)
 	case *ssa.Lookup:
-		tmp := RecordField{instrs, ins.X, 0, false, false}
-		r.RecordsetMap = append(r.RecordsetMap, tmp)
+		r.AddOperation(instrs, ins.X, 0, false, false)
+		r.AddOperation(instrs, ins.Index, 0, false, false)
 	default:
 	}
+	r.lastIns = instrs
 }
 
 func (r *CheckerRunner) visitBasicBlock(fnname string, bb *ssa.BasicBlock) {
@@ -586,23 +609,7 @@ func (r *CheckerRunner) runFunc1(fn *ssa.Function) {
 			case *ssa.MapUpdate:
 			case *ssa.Lookup:
 			default:
-				elem := freevar.Type().Underlying().(*types.Pointer).Elem()
-				if _, ok := elem.(*types.Basic); ok {
-					tmp := RecordField{ref[i], freevar, 0, isWrite(ref[i], freevar), false}
-					r.RecordsetBasic = append(r.RecordsetBasic, tmp)
-				}
-				if _, ok := elem.(*types.Array); ok {
-					tmp := RecordField{ref[i], freevar, 0, isWrite(ref[i], freevar), false}
-					r.RecordSetArray = append(r.RecordSetArray, tmp)
-				}
-				if _, ok := elem.(*types.Struct); ok {
-					tmp := RecordField{ref[i], freevar, 0, isWrite(ref[i], freevar), false}
-					r.RecordsetField = append(r.RecordsetField, tmp)
-				}
-				if _, ok := elem.(*types.Map); ok {
-					tmp := RecordField{ref[i], freevar, 0, isWrite(ref[i], freevar), false}
-					r.RecordsetMap = append(r.RecordsetMap, tmp)
-				}
+				r.AddOperation(ref[i], freevar, 0, isWrite(ref[i], freevar), false)
 			}
 		}
 	}
@@ -1145,6 +1152,8 @@ func (r *CheckerRunner) PrintResult() int {
 					fmt.Printf("\t and more %d race ...\n", len(v)-1)
 				}
 				break
+			} else {
+				fmt.Printf("=====\n")
 			}
 		}
 
