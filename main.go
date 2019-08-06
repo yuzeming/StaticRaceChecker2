@@ -140,6 +140,9 @@ func GetAnnoFunctionList(fn *ssa.Function) (anfn []*ssa.Function) {
 func (r *CheckerRunner) BuildMuteMap() {
 	r.MuteMap = make(map[int]bool)
 	fset := token.NewFileSet()
+	if r.prog.Fset == nil {
+		return
+	}
 	r.prog.Fset.Iterate(func(file *token.File) bool {
 		f, err := parser.ParseFile(fset, file.Name(), nil, parser.ParseComments)
 		if err != nil {
@@ -191,7 +194,11 @@ func (r *CheckerRunner) RacePairsAnalyzerRun() {
 			Mains:          mainPkgs,
 			BuildCallGraph: true,
 		}
+		if !r.debugPrint {
+			os.Stderr.Close()
+		}
 		result, err := pointer.Analyze(config)
+
 		if err != nil {
 			//println("Panic At pointer.Analyze")
 			callGraph = cg2
@@ -1119,7 +1126,13 @@ func (s ValueList) Len() int           { return len(s) }
 func (s ValueList) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
 func (s ValueList) Less(i, j int) bool { return s[i].Pos() < s[j].Pos() }
 
+var globeOutputMutex sync.Mutex
+var globeID int
+
 func (r *CheckerRunner) PrintResult() int {
+	globeOutputMutex.Lock()
+	defer globeOutputMutex.Unlock()
+
 	r.ResultMux.Lock()
 	defer r.ResultMux.Unlock()
 	var varlist ValueList
@@ -1128,12 +1141,12 @@ func (r *CheckerRunner) PrintResult() int {
 	}
 	sort.Sort(varlist)
 
-	for i := range varlist {
-		k := varlist[i+r.indexStart]
+	for _, k := range varlist {
+		globeID++
 		v := r.ResultSet[k]
-		fmt.Printf("----------Bug[%d]----------\n", i)
+		fmt.Printf("----------Bug[%d]----------\n", globeID)
 		fmt.Printf("Type: Data Race \tReason: Two goroutines access the same variable concurrently and at least one of the accesses is a write. \n")
-		fmt.Printf("Variable: %s \tFunction: %s \nPosition:%s\n", k.String(), k.Parent().Name(), toStringValue(r.prog, k))
+		fmt.Printf("Variable: %s \tFunction: %s \nPosition: %s\n", k.String(), k.Parent().Name(), toStringValue(r.prog, k))
 		for j := range v {
 			p1, p2 := v[j].field[0], v[j].field[1]
 			fmt.Printf("Access1: %s @ %s\tAtomic:%t\tWrite:%t\n", p1.ins.String(), toString(r.prog, p1.ins), p1.isAtomic, p1.isWrite)
@@ -1169,7 +1182,13 @@ func (r *CheckerRunner) PrintResult() int {
 	return len(varlist)
 }
 
-func Run(conf *CheckerRunner, path string) int {
+func Run(conf *CheckerRunner, path string) (ret int) {
+	//defer func() {
+	//	if err := recover(); err != nil {
+	//		log.Print(err)
+	//		ret = 0
+	//	}
+	//}()
 	runner := *conf
 	runner.path = path
 
@@ -1253,7 +1272,7 @@ func main() {
 		gosrc := path.Join(gopath, "src")
 		err := filepath.Walk(path.Join(gosrc, conf.path), func(path1 string, info os.FileInfo, err error) error {
 			//println(path1)
-			if !info.IsDir() {
+			if info == nil || !info.IsDir() {
 				return nil
 			}
 
@@ -1271,10 +1290,19 @@ func main() {
 	} else {
 		dirlist = append(dirlist, conf.path)
 	}
-
+	const MX = 8
+	ch := make(chan int, MX)
 	for _, p := range dirlist {
-		tmp := Run(conf, p)
-		conf.indexStart += tmp
+		p := p
+		ch <- 1
+		go func() {
+			//println("run [ZZZ]",p)
+			Run(conf, p)
+			<-ch
+		}()
+	}
+	for i := 0; i < MX; i++ {
+		ch <- 1
 	}
 
 }
