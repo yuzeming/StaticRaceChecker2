@@ -687,6 +687,18 @@ func isSmallFunc(fn *ssa.Function) bool {
 	return len(fn.Params) == 0 && len(fn.FreeVars) > 0 && len(fn.Blocks) == 1 && len(fn.Blocks[0].Instrs) < 20
 }
 
+func NotTimeoutState(states []*ssa.SelectState) (ret []int) {
+	for i, state := range states {
+		if call, ok := state.Chan.(*ssa.Call); ok {
+			if call.Call.Value.String() == "time.After" {
+				continue
+			}
+		}
+		ret = append(ret, i)
+	}
+	return ret
+}
+
 func (r *CheckerRunner) GetSyncValue(instr ssa.Instruction, dir int, op1 ssa.Instruction, icase *int) (ret SyncMutexList) {
 	switch ins := instr.(type) {
 	case *ssa.Send:
@@ -702,7 +714,12 @@ func (r *CheckerRunner) GetSyncValue(instr ssa.Instruction, dir int, op1 ssa.Ins
 			}
 		} else {
 			if *icase == -1 {
-				return nil
+				notimeout := NotTimeoutState(ins.States)
+				if len(notimeout) == 1 {
+					*icase = notimeout[0]
+				} else {
+					return nil
+				}
 			}
 			tmp := *icase
 			*icase = -1

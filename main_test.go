@@ -762,3 +762,26 @@ func main() {
 		752: {{757, 760}, {757, 760}, {757, 759}, {757, 760}},
 	}, 750)
 }
+
+func TestTimeout(t *testing.T) {
+	myprog := `package main
+import "time"
+func main() {
+	ch := make(chan int)
+	a:=1
+	go func() {
+		a=2
+		ch<-100
+	}()
+
+	select {
+	case <-ch:
+		println(a)
+	case <-time.After(time.Second):
+		println("timeout")
+	}
+	println(a)
+}
+`
+	RunTestCase(t, myprog, SimpleResult{}, 0)
+}
