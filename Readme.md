@@ -1,6 +1,6 @@
 This is a static race detecter designed for data race between anonymous function and its outside function especially sharing data by closure.
 
-This project contributed 9 commits for several famous open source software.
+This project contributed some commits for several famous open source software.
 
 [cockroach](https://github.com/cockroachdb/cockroach)
 * https://github.com/cockroachdb/cockroach/pull/39282
